@@ -80,6 +80,7 @@ LIVE_NEG        = _env_int("LIVE_NEG", 60)         # empty hub parse cache
 WN_TTL          = _env_int("WN_TTL", 6 * 3600)     # WN signed link (~8h life)
 WN_STALE        = _env_int("WN_STALE", 6 * 3600)   # max stale-serve age, WN
 CINE_TTL        = _env_int("CINE_TTL", 6 * 3600)   # Cinemeta title cache
+TMDB_TTL        = _env_int("TMDB_TTL", 7 * 24 * 3600)  # genre lookup cache
 
 VERSION  = "3.4.5"
 ADDON_ID = "community.raretoons2"
@@ -87,6 +88,10 @@ ADDON_NAME = "mollad_jaat"
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 SITE = "https://www.rareanimes.mov/"
 ARGON = "https://argon.razorshell.space/"
+# Public default key (same one Cinemeta-style community addons embed);
+# override with your own via env var TMDB_API_KEY.
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "1af06616dcbb28ff03088d87d63211f5")
+TMDB_CACHE_FILE = os.path.join(BASE_DIR, "tmdb_cache.json")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
@@ -147,6 +152,34 @@ def _display(show):
 
 SHOWS = {}
 
+# slug -> {"g": [genre names...], "t": epoch}; loaded before _build_shows()
+# runs so the very first /api/shows already carries whatever we cached
+# on a previous run.
+_tmdb_lock = threading.Lock()
+_TMDB_CACHE = {}
+
+
+def _tmdb_load_cache():
+    global _TMDB_CACHE
+    try:
+        with open(TMDB_CACHE_FILE, encoding="utf-8") as fh:
+            _TMDB_CACHE = json.load(fh)
+    except Exception:
+        _TMDB_CACHE = {}
+
+
+def _tmdb_save_cache():
+    try:
+        tmp = TMDB_CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(_TMDB_CACHE, fh)
+        os.replace(tmp, TMDB_CACHE_FILE)
+    except Exception:
+        pass
+
+
+_tmdb_load_cache()
+
 
 def _build_shows():
     for r in ROWS:
@@ -166,6 +199,7 @@ def _build_shows():
     for rec in SHOWS.values():
         rec["movie"] = all((k[0] or 0) == 0 for k in rec["eps"]) if rec["eps"] else False
         rec["poster"] = rec["poster"] or POSTERS.get(rec["site_name"], "")
+        rec["genres"] = _TMDB_CACHE.get(rec["slug"], {}).get("g", [])
 
 
 _build_shows()
@@ -811,10 +845,12 @@ def _ensure_show(slug, hub_url, site_title, cinemeta_name):
                "name": cinemeta_name or site_title
                        or slug.replace("_", " ").title(),
                "movie": _slug_is_movie(slug),
-               "poster": "", "hub": hub_url, "eps": {}}
+               "poster": "", "hub": hub_url, "eps": {},
+               "genres": _TMDB_CACHE.get(slug, {}).get("g", [])}
         SHOWS[slug] = rec
     _bg_once(("poster", slug),
              lambda: _fetch_poster(rec))
+    _show_genres(rec)
     return rec
 
 
@@ -834,6 +870,101 @@ def _fetch_poster(rec):
             rec["poster"] = og.group(1).replace(dd + dd, dd)
     except Exception:
         pass
+
+
+# ------------------------------------------------------------- TMDB ---
+# Genre lookup.  The crawled index has no genre field at all (the site
+# itself doesn't tag genres), so we ask TMDB by title and cache the
+# result forever (genres for a given show practically never change).
+_TMDB_GENRE_MAP = {}      # {"tv": {id: name}, "movie": {id: name}}
+
+
+def _tmdb_get(path, **params):
+    params["api_key"] = TMDB_API_KEY
+    r = requests.get("https://api.themoviedb.org/3" + path,
+                      params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def _tmdb_genre_map(kind):
+    """kind: 'tv' or 'movie'.  {id: name}, cached in memory for the
+    process lifetime (TMDB's genre list is effectively static)."""
+    if kind in _TMDB_GENRE_MAP:
+        return _TMDB_GENRE_MAP[kind]
+    try:
+        j = _tmdb_get(f"/genre/{kind}/list")
+        m = {g["id"]: g["name"] for g in j.get("genres", [])}
+    except Exception:
+        m = {}
+    _TMDB_GENRE_MAP[kind] = m
+    return m
+
+
+def _tmdb_lookup_genres(name, is_movie):
+    """One TMDB search call -> genre names for the closest-titled result,
+    or [] if nothing matched / the request failed."""
+    try:
+        kind = "movie" if is_movie else "tv"
+        j = _tmdb_get(f"/search/{kind}", query=name)
+        results = j.get("results") or []
+        if not results:
+            return []
+        gm = _tmdb_genre_map(kind)
+        ids = results[0].get("genre_ids") or []
+        return [gm[i] for i in ids if i in gm]
+    except Exception:
+        return []
+
+
+def _show_genres(rec):
+    """Cached genres for a show record; kicks off a background TMDB
+    lookup on a cache miss/stale entry and returns what we have *now*
+    (possibly []) so callers never block on the network."""
+    slug = rec["slug"]
+    hit = _TMDB_CACHE.get(slug)
+    now = time.time()
+    if hit and now - hit.get("t", 0) < TMDB_TTL:
+        return hit.get("g", [])
+
+    def _run(rec=rec, slug=slug):
+        g = _tmdb_lookup_genres(rec.get("name") or rec.get("site_name") or slug,
+                                 bool(rec.get("movie")))
+        with _tmdb_lock:
+            _TMDB_CACHE[slug] = {"g": g, "t": time.time()}
+            _tmdb_save_cache()
+        rec["genres"] = g
+    _bg_once(("tmdb", slug), _run)
+    return hit.get("g", []) if hit else []
+
+
+def _tmdb_backfill():
+    """One-time (then daily) pass so every show gets a genre without
+    waiting for someone to open its page first.  Paced to stay well
+    under TMDB's rate limit."""
+    if not TMDB_API_KEY:
+        return
+    time.sleep(30)
+    while True:
+        with STORE_LOCK:
+            todo = [r for r in SHOWS.values()
+                    if time.time() - _TMDB_CACHE.get(r["slug"], {}).get("t", 0) >= TMDB_TTL]
+        n = 0
+        for rec in todo:
+            g = _tmdb_lookup_genres(rec.get("name") or rec.get("site_name") or rec["slug"],
+                                     bool(rec.get("movie")))
+            with _tmdb_lock:
+                _TMDB_CACHE[rec["slug"]] = {"g": g, "t": time.time()}
+            rec["genres"] = g
+            n += 1
+            if n % 20 == 0:
+                with _tmdb_lock:
+                    _tmdb_save_cache()
+            time.sleep(0.3)   # ~3 req/s, polite to TMDB's free tier
+        with _tmdb_lock:
+            _tmdb_save_cache()
+        print(f"[rt2] tmdb genre backfill: {n} shows updated", flush=True)
+        time.sleep(24 * 3600)
 
 
 def _site_search_slug(title, want_movie):
@@ -1203,7 +1334,7 @@ def handle_meta(mtype, mid):
         "background": rec["poster"] or None,
         "description": (f"{rec['name']} - every language the site "
                         "carries, streamed in-app as multi-quality HLS."),
-        "genres": ["Animation"],
+        "genres": _show_genres(rec) or ["Animation"],
         "videos": [],
     }
     if not rec["movie"]:
@@ -1497,7 +1628,7 @@ def api_shows():
         items = [{"slug": r["slug"], "name": r["name"],
                   "poster": r.get("poster") or "", "movie": bool(r["movie"]),
                   "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i,
-                  "le": _latest_ep(r)}
+                  "le": _latest_ep(r), "genres": _show_genres(r)}
                  for i, r in enumerate(SHOWS.values())]
     upd = _updates()
     for it in items:
@@ -2442,6 +2573,7 @@ def _catalog_refresh():
 def main():
     threading.Thread(target=_auto_refresh, daemon=True).start()
     threading.Thread(target=_catalog_refresh, daemon=True).start()
+    threading.Thread(target=_tmdb_backfill, daemon=True).start()
     _updates(); _popular()          # warm the caches at boot
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)

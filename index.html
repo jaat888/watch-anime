@@ -89,7 +89,7 @@ footer{text-align:center;color:var(--dim);font-size:13px;padding:30px 16px 96px}
 <script>
 "use strict";
 const $app=document.getElementById("app"),$q=document.getElementById("q"),$nav=document.getElementById("nav");
-let SHOWS=null,NOW=0,POP=[],filter="all",lang="all",shown=60,hls=null,ME=null,PROG=[],FAVS=[],saveTimer=null,heroTimer=null,nextTimer=null,installEvt=null;
+let SHOWS=null,NOW=0,POP=[],filter="all",lang="all",genre="all",shown=60,hls=null,ME=null,PROG=[],FAVS=[],saveTimer=null,heroTimer=null,nextTimer=null,installEvt=null;
 const META={};
 const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}},del(k){try{localStorage.removeItem(k)}catch(e){}}};
 function h(tag,a,...kids){const el=document.createElement(tag);for(const[k,v]of Object.entries(a||{})){if(k==="class")el.className=v;else if(k.startsWith("on"))el.addEventListener(k.slice(2),v);else if(v===true)el.setAttribute(k,"");else if(v!==false&&v!=null)el.setAttribute(k,v)}for(const c of kids.flat())if(c!=null)el.append(c.nodeType?c:document.createTextNode(c));return el}
@@ -107,7 +107,7 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("/sw.js").catch(
 
 /* ---------- bottom navigation ---------- */
 function drawNav(){const cur=location.hash.replace(/^#\/?/,"").split("/")[0];
-  const items=[["home","⌂","Home",()=>{$q.value="";filter="all";lang="all";go("#/");route()}],["list","♥","My List",()=>go("#/list")],["acct","☺","Account",()=>ME?accountModal():authModal()]];
+  const items=[["home","⌂","Home",()=>{$q.value="";filter="all";lang="all";genre="all";go("#/");route()}],["list","♥","My List",()=>go("#/list")],["acct","☺","Account",()=>ME?accountModal():authModal()]];
   $nav.replaceChildren(...items.map(([k,i,l,f])=>h("button",{class:(k==="home"&&!["list","show","watch"].includes(cur))||k===cur?"on":"",onclick:f},h("span",{},i),l)))}
 
 /* ---------- account ---------- */
@@ -156,9 +156,10 @@ function heroEl(items){
     items.length>1?h("div",{class:"dots"},items.map((_,k)=>h("i",{class:k===i?"on":""}))):null)}
   draw();if(items.length>1)heroTimer=setInterval(()=>{i=(i+1)%items.length;draw()},6000);return box}
 const A=s=>s.kind!=="cartoon";
-function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=term||filter!=="all"||lang!=="all";
+function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=term||filter!=="all"||lang!=="all"||genre!=="all";
   const langs=[...new Set(SHOWS.flatMap(s=>s.langs||[]))].sort();
-  const list=SHOWS.filter(s=>(filter==="all"||(filter==="movie"?s.movie:filter==="cartoon"?(!s.movie&&!A(s)):(!s.movie&&A(s))))&&(lang==="all"||(s.langs||[]).includes(lang))&&(!term||s.name.toLowerCase().includes(term)));
+  const genres=[...new Set(SHOWS.flatMap(s=>s.genres||[]))].sort();
+  const list=SHOWS.filter(s=>(filter==="all"||(filter==="movie"?s.movie:filter==="cartoon"?(!s.movie&&!A(s)):(!s.movie&&A(s))))&&(lang==="all"||(s.langs||[]).includes(lang))&&(genre==="all"||(s.genres||[]).includes(genre))&&(!term||s.name.toLowerCase().includes(term)));
   const cont=PROG.map(p=>({p,s:bySlug(p.slug)})).filter(x=>x.s);
   const fresh=SHOWS.filter(s=>isNew(s)&&A(s)).sort((a,b)=>b.upd-a.upd);
   const recent=SHOWS.filter(s=>!s.movie&&A(s)&&s.poster&&!fresh.includes(s)).sort((a,b)=>b.ord-a.ord);
@@ -177,8 +178,9 @@ function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=t
     kids.push(...rail("Cartoons",SHOWS.filter(s=>!s.movie&&!A(s)&&s.poster).sort((a,b)=>b.ord-a.ord).slice(0,20),()=>{filter="cartoon";lang="all";shown=60;home()}));
     kids.push(...rail("Movies",SHOWS.filter(s=>s.movie&&s.poster).slice(0,20),()=>{filter="movie";lang="all";shown=60;home()}))}
   const sel=h("select",{onchange:e=>{lang=e.target.value;shown=60;home()}},h("option",{value:"all"},"All languages"),langs.map(l=>h("option",{value:l,selected:l===lang},l)));
+  const gsel=h("select",{onchange:e=>{genre=e.target.value;shown=60;home()}},h("option",{value:"all"},"All genres"),genres.map(g=>h("option",{value:g,selected:g===genre},g)));
   kids.push(h("h2",{class:"sec"},browsing?"Results":"Browse all",h("span",{class:"muted",style:"font-weight:400;font-size:13px"},list.length+" titles")),
-    h("div",{class:"filters"},[["all","All"],["anime","Anime"],["cartoon","Cartoons"],["movie","Movies"]].map(([k,l])=>h("button",{class:"tab","aria-pressed":String(filter===k),onclick:()=>{filter=k;shown=60;home()}},l)),sel),
+    h("div",{class:"filters"},[["all","All"],["anime","Anime"],["cartoon","Cartoons"],["movie","Movies"]].map(([k,l])=>h("button",{class:"tab","aria-pressed":String(filter===k),onclick:()=>{filter=k;shown=60;home()}},l)),sel,genres.length?gsel:null),
     h("div",{class:"grid"},list.slice(0,shown).map(s=>card(s))));
   if(list.length>shown)kids.push(h("p",{style:"text-align:center"},h("button",{class:"btn",onclick:()=>{shown+=60;home()}},"Show more")));
   if(!list.length)kids.push(h("p",{class:"muted"},"No results found."));
@@ -307,7 +309,7 @@ async function route(){try{await loadShows();const p=location.hash.replace(/^#\/
   if(p[0]==="show"&&p[1])return showPage(p[1]);if(p[0]==="watch"&&p[1])return watchPage(p[1],p[2],p[3]);if(p[0]==="list")return listPage();home()}
   catch(e){$app.replaceChildren(h("p",{class:"muted"},"Could not load. Please refresh the page."))}}
 addEventListener("hashchange",route);
-document.getElementById("logo").onclick=()=>{$q.value="";filter="all";lang="all";go("#/");route()};
+document.getElementById("logo").onclick=()=>{$q.value="";filter="all";lang="all";genre="all";go("#/");route()};
 let qt;$q.oninput=()=>{clearTimeout(qt);qt=setTimeout(()=>{shown=60;if(location.hash&&location.hash!=="#/")go("#/");else if(SHOWS)home()},200)};
 /* the list of shows and the account load in parallel; the page shows as soon as the shows arrive */
 meReady=loadMe().then(()=>{const p=location.hash.replace(/^#\/?/,"").split("/")[0];if(SHOWS&&p!=="watch")route()});
