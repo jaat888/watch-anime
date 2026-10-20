@@ -133,7 +133,7 @@ function accountModal(){
 async function loadShows(){if(SHOWS)return;$app.replaceChildren(h("p",{class:"muted"},"Loading…"));const j=await api("/api/shows");SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[]}
 const bySlug=s=>SHOWS.find(x=>x.slug===s);
 const isNew=s=>s.upd&&NOW-s.upd<7*86400;
-async function getVids(s){if(META[s.slug])return META[s.slug];let v=[];try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[]}catch(e){}return META[s.slug]=v}
+async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<120000)return c.v;let v=[];try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[]}catch(e){}if(v.length||s.movie)META[s.slug]={t:Date.now(),v};else if(c)return c.v;return v}
 function posterEl(s){const f=()=>h("div",{class:"ph"},(s.name[0]||"?").toUpperCase());if(!s.poster)return f();
   const i=h("img",{class:"poster",loading:"lazy",alt:"",referrerpolicy:"no-referrer",src:s.poster});i.onerror=()=>i.replaceWith(f());return i}
 function card(s,pct,onclick){return h("button",{class:"card",onclick:onclick||(()=>go("#/show/"+s.slug))},posterEl(s),isNew(s)&&pct==null?h("div",{class:"badge"},"NEW"):null,pct!=null?h("div",{class:"prog"},h("i",{style:"width:"+pct+"%"})):null,h("div",{class:"t"},s.name))}
