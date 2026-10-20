@@ -75,6 +75,13 @@ video{width:100%;height:100%;display:block}
 .box{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:24px;width:100%;max-width:340px;display:grid;gap:10px}
 .err{color:var(--accent);font-size:13px;min-height:1em}
 footer{text-align:center;color:var(--dim);font-size:13px;padding:30px 16px 96px}footer a{color:var(--accent);text-decoration:none}
+
+/* old-browser (old TV Chrome) fallbacks */
+.poster,.ph{min-height:150px}
+@supports not (aspect-ratio:2/3){.poster,.ph{height:168px}.player{height:0;padding-bottom:56.25%}.player video{position:absolute;top:0;left:0}}
+@supports not (inset:0){.hero .bg,.msg,.modal,.top .bg{top:0;right:0;bottom:0;left:0}}
+.chips>*,.row2>*,.filters>*{margin:0 8px 8px 0}
+.dots i{margin-left:6px}
 </style>
 </head>
 <body>
@@ -85,6 +92,27 @@ footer{text-align:center;color:var(--dim);font-size:13px;padding:30px 16px 96px}
 </header>
 <main id="app"></main>
 <nav class="nav" id="nav"></nav>
+<script>
+/* polyfills for old browsers (TV Chrome < 86) */
+(function(){
+var E=Element.prototype,D=Document.prototype,F=DocumentFragment.prototype;
+function conv(a){var f=document.createDocumentFragment();for(var i=0;i<a.length;i++){var n=a[i];f.appendChild(n&&n.nodeType?n:document.createTextNode(String(n)))}return f}
+function def(o,n,fn){if(!o[n])Object.defineProperty(o,n,{value:fn,configurable:true,writable:true})}
+[E,D,F].forEach(function(p){
+ def(p,"append",function(){this.appendChild(conv(arguments))});
+ def(p,"prepend",function(){this.insertBefore(conv(arguments),this.firstChild)});
+ def(p,"replaceChildren",function(){while(this.firstChild)this.removeChild(this.firstChild);this.appendChild(conv(arguments))})});
+def(E,"remove",function(){if(this.parentNode)this.parentNode.removeChild(this)});
+def(E,"replaceWith",function(){if(this.parentNode)this.parentNode.replaceChild(conv(arguments),this)});
+def(Array.prototype,"flat",function(d){d=d===undefined?1:d;return this.reduce(function(a,x){return a.concat(Array.isArray(x)&&d>0?x.flat(d-1):x)},[])});
+def(Array.prototype,"flatMap",function(f,t){return this.map(f,t).flat(1)});
+def(Array.prototype,"includes",function(v){return this.indexOf(v)>-1});
+if(!Object.entries)Object.entries=function(o){return Object.keys(o).map(function(k){return[k,o[k]]})};
+if(!window.Promise||!window.fetch){document.title="Browser too old"}
+/* show any script error on screen so it is easy to debug on a TV */
+window.addEventListener("error",function(e){var a=document.getElementById("app");if(a&&!a.firstChild){var p=document.createElement("p");p.style.cssText="padding:16px;color:#c00;font:14px monospace";p.textContent="Error: "+e.message+" (line "+e.lineno+")";a.appendChild(p)}});
+})();
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
 <script>
 "use strict";
