@@ -8,7 +8,7 @@ CARD FORMAT (one card per language that actually plays in-app)
     name   ◫ MQ ◫
     title  ⧉ <title> ⌗ <Language>[ · sub]
            ⬡ Movie | ⬡ S01E05 · <episode title>
-           ⊞ RareToons ◧ MQ 1080·720·360[ · note]
+           ⊞ mollad_jaat ◧ MQ 1080·720·360[ · note]
 
     Languages: Hindi, Tamil, Telugu, Bengali, Malayalam, Urdu, English,
     Japanese, Anime Times ... (whatever the show's hub carries).
@@ -41,6 +41,10 @@ IDS
 Run:  python3 addon.py [port]     (binds 0.0.0.0)
 """
 import base64
+import gzip
+import hashlib
+import hmac
+import secrets
 import json
 import os
 import re
@@ -52,6 +56,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote, urljoin
 
+import accounts
 import requests
 from curl_cffi import requests as creq
 
@@ -78,7 +83,7 @@ CINE_TTL        = _env_int("CINE_TTL", 6 * 3600)   # Cinemeta title cache
 
 VERSION  = "3.4.2"
 ADDON_ID = "community.raretoons2"
-ADDON_NAME = "RareToons"
+ADDON_NAME = "mollad_jaat"
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 SITE = "https://www.rareanimes.mov/"
 ARGON = "https://argon.razorshell.space/"
@@ -366,16 +371,37 @@ def _mq_resolve(zipper, stale_ok=False):
     return None, None
 
 
-def _mq_token(zipper):
-    return base64.urlsafe_b64encode(zipper.encode()).decode().rstrip("=")
+# Opaque tokens: every upstream URL that appears in a link we hand out is
+# encrypted + authenticated with a server-side key, so nobody can decode a
+# /mq/... link back to the source site or CDN.  Key = TOKEN_SECRET env var,
+# else derived from SQL_URL / ADMIN_KEY (stable across restarts), else random.
+_TK = hashlib.sha256((os.environ.get("TOKEN_SECRET") or os.environ.get("SQL_URL")
+                      or os.environ.get("ADMIN_KEY") or secrets.token_hex(32)).encode()).digest()
 
 
-def _mq_decode_token(token):
+def _seal(text):
+    plain = text.encode()
+    tag = hmac.new(_TK, b"t" + plain, hashlib.sha256).digest()[:12]
+    ks = b"".join(hmac.new(_TK, tag + i.to_bytes(4, "big"), hashlib.sha256).digest()
+                  for i in range(len(plain) // 32 + 1))
+    ct = bytes(a ^ b for a, b in zip(plain, ks))
+    return base64.urlsafe_b64encode(tag + ct).decode().rstrip("=")
+
+
+def _unseal(token):
     try:
-        return base64.urlsafe_b64decode(
-            token + "=" * (-len(token) % 4)).decode()
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+        tag, ct = raw[:12], raw[12:]
+        ks = b"".join(hmac.new(_TK, tag + i.to_bytes(4, "big"), hashlib.sha256).digest()
+                      for i in range(len(ct) // 32 + 1))
+        plain = bytes(a ^ b for a, b in zip(ct, ks))
+        good = hmac.new(_TK, b"t" + plain, hashlib.sha256).digest()[:12]
+        return plain.decode() if hmac.compare_digest(tag, good) else ""
     except Exception:
         return ""
+
+
+_mq_token, _mq_decode_token = _seal, _unseal
 
 
 # ------------------------------------------------- WatchNow direct source --
@@ -1072,11 +1098,11 @@ def _phx_card(rec, lang, prefix, ep_title, note, zipper, base, src="MQ",
         name, binge, fname = "◫ WN ◫", f"rt2|wn|{lang.lower()}", f"{prefix}.mkv"
         url = zipper
         wq = f" · {qres}" if qres else ""
-        line3 = ("⊞ RareToons ◧ WN" + wq + " · Untouched MKV"
+        line3 = ("⊞ mollad_jaat ◧ WN" + wq + " · Untouched MKV"
                  if kind == "fsl"
-                 else "⊞ RareToons ◧ WN" + wq + " · Untouched (progressive)")
+                 else "⊞ mollad_jaat ◧ WN" + wq + " · Untouched (progressive)")
     else:
-        line3 = "⊞ RareToons ◧ MQ" + (f" · {qres}" if qres else "")
+        line3 = "⊞ mollad_jaat ◧ MQ" + (f" · {qres}" if qres else "")
         name, binge, fname = "◫ MQ ◫", f"rt2|mq|{lang.lower()}", f"{prefix}.m3u8"
         url = f"{base}/mq/{_mq_token(zipper)}.m3u8"
     if note:
@@ -1408,14 +1434,113 @@ def handle_stream(mtype, mid):
     return {"streams": streams}
 
 # ------------------------------------------------------ website API --------
+_LANG_KEYS = ["Hindi", "Tamil", "Telugu", "Bengali", "Malayalam", "Kannada", "Urdu", "English", "Japanese"]
+
+
+def _show_langs(rec):
+    found = set()
+    for rows in rec["eps"].values():
+        for r in rows:
+            for k in _LANG_KEYS:
+                if k.lower() in (r.get("lang") or "").lower():
+                    found.add(k)
+    return sorted(found)
+
+
 def api_shows():
     """Compact list for the website grid (name, slug, poster, movie?)."""
     with STORE_LOCK:
         items = [{"slug": r["slug"], "name": r["name"],
-                  "poster": r.get("poster") or "", "movie": bool(r["movie"])}
+                  "poster": r.get("poster") or "", "movie": bool(r["movie"]),
+                  "langs": _show_langs(r)}
                  for r in SHOWS.values()]
+    upd = _updates()
+    for it in items:
+        it["upd"] = int(upd.get(it["slug"], 0))
+        if it["poster"].startswith("https://"):
+            it["poster"] = "/img/s/" + it["slug"]      # short link; hides the source site
     items.sort(key=lambda x: x["name"].lower())
-    return {"shows": items}
+    return {"shows": items, "now": int(time.time()), "popular": _popular()}
+
+
+_img_cache = {}
+
+
+def _serve_img(handler, token, url=None):
+    url = url or _unseal(token)
+    if not url.startswith("https://"):
+        return handler._send({"error": "bad image"}, 400)
+    hit = _img_cache.get(token)
+    if not hit:
+        r = upstream_get(url, referer=SITE, timeout=15)
+        if r.status_code != 200 or "image" not in (r.headers.get("content-type") or ""):
+            return handler._send({"error": "no image"}, 404)
+        hit = (r.content, r.headers.get("content-type"))
+        if len(_img_cache) > 400:
+            _img_cache.pop(next(iter(_img_cache)))
+        _img_cache[token] = hit
+    handler.send_response(200)
+    handler.send_header("Content-Type", hit[1])
+    handler.send_header("Content-Length", str(len(hit[0])))
+    handler.send_header("Cache-Control", "public, max-age=604800")
+    handler.end_headers()
+    handler.wfile.write(hit[0])
+
+
+_pop_cache = {"t": 0, "data": []}
+
+
+def _popular():
+    if time.time() - _pop_cache["t"] > 600 and not _pop_cache.get("busy"):
+        _pop_cache["busy"] = True
+
+        def _run():
+            try:
+                _pop_cache.update(t=time.time(), data=accounts.popular())
+            except Exception:
+                _pop_cache["t"] = time.time() - 540
+            finally:
+                _pop_cache["busy"] = False
+        threading.Thread(target=_run, daemon=True).start()
+    return _pop_cache["data"]
+
+
+_upd_cache = {"t": 0, "data": {}}
+
+
+def _updates():
+    """slug -> unix time its episode count last grew (0 = since tracking began).
+    Never blocks a request: serves the cached copy and refreshes in the background."""
+    if time.time() - _upd_cache["t"] >= 600 and not _upd_cache.get("busy"):
+        _upd_cache["busy"] = True
+        threading.Thread(target=_updates_refresh, daemon=True).start()
+    return _upd_cache["data"]
+
+
+def _updates_refresh():
+    now = time.time()
+    try:
+        with STORE_LOCK:
+            counts = {slug: len(rec["eps"]) for slug, rec in SHOWS.items()}
+        raw = accounts.kv_get("ep_counts")
+        old = json.loads(raw) if raw else None
+        new, dirty = {}, old is None
+        for slug, c in counts.items():
+            o = (old or {}).get(slug)
+            if o is None:
+                new[slug] = [c, 0 if old is None else now]; dirty = True
+            elif c > o[0]:
+                new[slug] = [c, now]; dirty = True
+            else:
+                new[slug] = [o[0], o[1]]
+        if dirty:
+            accounts.kv_set("ep_counts", json.dumps(new, separators=(",", ":")))
+        _upd_cache.update(t=now, data={k: v[1] for k, v in new.items()})
+    except Exception as e:
+        print("[rt2] updates tracking failed:", e, flush=True)
+        _upd_cache["t"] = now - 540      # retry in ~1 minute
+    finally:
+        _upd_cache["busy"] = False
 
 
 def api_watch(slug, season, episode):
@@ -1448,16 +1573,7 @@ _B64_RE = r"[A-Za-z0-9_\-]"
 _URL_ATTR_RE = re.compile(r'URI="([^"]+)"')
 
 
-def _u64(text):
-    return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
-
-
-def _u64d(text):
-    try:
-        return base64.urlsafe_b64decode(
-            text + "=" * (-len(text) % 4)).decode()
-    except Exception:
-        return ""
+_u64, _u64d = _seal, _unseal
 
 
 def _rewrite_m3u8(text, base_url, proxy_prefix):
@@ -1809,6 +1925,9 @@ def _serve_wn_slice(handler, b64url):
 
 
 # ---------------------------------------------------------- http server ----
+_admin_fails = {}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "RareToons2"
@@ -1819,7 +1938,13 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------ helpers ----
     def _send(self, obj, code=200, ctype="application/json"):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        gz = len(body) > 1500 and "gzip" in (self.headers.get("Accept-Encoding") or "")
+        if gz:
+            body = gzip.compress(body, 5)
         self.send_response(code)
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -1838,9 +1963,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Methods", "GET, HEAD, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "range, origin, "
-                          "content-type, accept")
+                          "content-type, accept, authorization")
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -1852,6 +1977,84 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._is_head = False
         self._route()
+
+    def _token(self):
+        a = self.headers.get("Authorization") or ""
+        return a[7:] if a.startswith("Bearer ") else ""
+
+    def _body(self):
+        try:
+            n = min(int(self.headers.get("Content-Length") or 0), 10000)
+            return json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            return {}
+
+    def _admin(self, path, b):
+        """Admin API. Disabled unless the ADMIN_KEY env var is set."""
+        key = os.environ.get("ADMIN_KEY", "")
+        ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+        bad = _admin_fails.get(ip, (0, 0))
+        if bad[0] >= 5 and time.time() - bad[1] < 600:
+            return self._send({"error": "Too many attempts. Try again in 10 minutes."}, 429)
+        given = self.headers.get("X-Admin-Key") or ""
+        if not key or not hmac.compare_digest(given.encode(), key.encode()):
+            _admin_fails[ip] = (bad[0] + 1, time.time())
+            return self._send({"error": "Wrong admin key."}, 403)
+        _admin_fails.pop(ip, None)
+        if path == "/api/admin/stats":
+            return self._send(accounts.admin_stats())
+        err = None
+        if path == "/api/admin/password":
+            err = accounts.admin_set_password(str(b.get("username", "")), str(b.get("password", "")))
+        elif path == "/api/admin/delete":
+            err = accounts.admin_delete(str(b.get("username", "")))
+        else:
+            return self._send({"error": "not found"}, 404)
+        return self._send({"error": err}, 400) if err else self._send({"ok": True})
+
+    def do_POST(self):
+        self._is_head = False
+        path = unquote(urlparse(self.path).path)
+        try:
+            b = self._body()
+            if path.startswith("/api/admin/"):
+                return self._admin(path, b)
+            if path in ("/api/signup", "/api/login"):
+                fn = accounts.signup if path == "/api/signup" else accounts.login
+                tok, err = fn(str(b.get("username", "")).strip(), str(b.get("password", "")))
+                if err:
+                    return self._send({"error": err}, 400)
+                return self._send({"token": tok, "user": accounts.user_for(tok)})
+            if path == "/api/logout":
+                accounts.logout(self._token())
+                return self._send({"ok": True})
+            u = accounts.user_for(self._token())
+            if not u:
+                return self._send({"error": "Please sign in."}, 401)
+            if path == "/api/progress":
+                slug = str(b.get("slug", ""))[:100]
+
+                def _save(uid=u["id"], b=b, slug=slug):
+                    try:
+                        accounts.save_progress(uid, slug, b.get("season"), b.get("episode"),
+                                               b.get("pos"), b.get("dur"))
+                        if float(b.get("dur") or 0) > 0 and float(b.get("pos") or 0) / float(b["dur"]) >= 0.85:
+                            accounts.mark_seen(uid, slug, b.get("season"), b.get("episode"))
+                    except Exception as e:
+                        print("[rt2] progress save failed:", e, flush=True)
+                threading.Thread(target=_save, daemon=True).start()
+                return self._send({"ok": True})
+            if path == "/api/fav":
+                accounts.set_fav(u["id"], str(b.get("slug", ""))[:100], bool(b.get("on")))
+                return self._send({"ok": True})
+            if path == "/api/password":
+                err = accounts.change_password(u["id"], self._token(), str(b.get("old", "")), str(b.get("new", "")))
+                return self._send({"error": err}, 400) if err else self._send({"ok": True})
+            self._send({"error": "not found"}, 404)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as exc:
+            self._send({"error": str(exc)}, 500)
 
     def _route(self):
         parsed = urlparse(self.path)
@@ -1872,6 +2075,35 @@ class Handler(BaseHTTPRequestHandler):
                             "status": "ok", "series": len(SERIES),
                             "movies": len(MOVIES), "rows": len(ROWS)})
                 return
+            m = re.match(r"^/img/s/([a-z0-9_]+)$", path)
+            if m:
+                rec = SHOWS.get(m.group(1))
+                if not rec or not rec.get("poster"):
+                    return self._send({"error": "no image"}, 404)
+                _serve_img(self, "s:" + m.group(1), rec["poster"])
+                return
+            m = re.match(rf"^/img/({_B64_RE}+)$", path)
+            if m:
+                _serve_img(self, m.group(1))
+                return
+            if path == "/admin":
+                with open(os.path.join(BASE_DIR, "admin.html"), "rb") as fh:
+                    self._send_raw(fh.read(), "text/html; charset=utf-8")
+                return
+            if path == "/api/me":
+                u = accounts.user_for(self._token())
+                if not u:
+                    return self._send({"error": "Please sign in."}, 401)
+                box = {}
+                th = threading.Thread(target=lambda: box.update(f=accounts.get_favs(u["id"])))
+                th.start()                                  # the two lookups run in parallel
+                prog = accounts.get_progress(u["id"])
+                th.join()
+                return self._send({"user": u, "progress": prog, "favs": box.get("f", [])})
+            m = re.match(r"^/api/seen/([a-z0-9_]+)$", path)
+            if m:
+                u = accounts.user_for(self._token())
+                return self._send({"seen": accounts.get_seen(u["id"], m.group(1)) if u else []})
             if path == "/api/shows":
                 self._send(api_shows())
                 return
@@ -1882,12 +2114,15 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/manifest.json":
                 self._send(handle_manifest(_public_base_holder["base"]))
                 return
-            if path == "/logo.png":
+            static = {"/logo.png": ("icon-512.png", "image/png"), "/icon-192.png": ("icon-192.png", "image/png"),
+                      "/icon-512.png": ("icon-512.png", "image/png"), "/sw.js": ("sw.js", "text/javascript"),
+                      "/app.webmanifest": ("app.webmanifest", "application/manifest+json")}
+            if path in static:
                 try:
-                    with open(os.path.join(BASE_DIR, "logo.png"), "rb") as fh:
-                        self._send_raw(fh.read(), "image/png")
+                    with open(os.path.join(BASE_DIR, static[path][0]), "rb") as fh:
+                        self._send_raw(fh.read(), static[path][1])
                 except Exception:
-                    self._send({"error": "no logo"}, 404)
+                    self._send({"error": "not found"}, 404)
                 return
 
             m = re.match(r"^/meta/(series|movie)/(raretoons2:.+)\.json$",
@@ -1979,7 +2214,31 @@ def public_base_from(handler):
 
 print("[rt2] BOOT v=" + VERSION, flush=True)
 
+def _auto_refresh():
+    """Keeps episode lists fresh without a redeploy: re-reads one series'
+    hub page every AUTO_REFRESH_SECONDS, oldest-checked first."""
+    gap = float(os.environ.get("AUTO_REFRESH_SECONDS", "15"))
+    if gap <= 0:
+        return
+    last = {}
+    time.sleep(60)
+    while True:
+        try:
+            with STORE_LOCK:
+                slugs = [k for k, r in SHOWS.items() if not r["movie"] and r.get("hub")]
+            if slugs:
+                slug = min(slugs, key=lambda k: last.get(k, 0))
+                last[slug] = time.time()
+                rec = SHOWS[slug]
+                _absorb_live(rec, _live_rows(rec))
+        except Exception as e:
+            print("[rt2] auto refresh:", e, flush=True)
+        time.sleep(gap)
+
+
 def main():
+    threading.Thread(target=_auto_refresh, daemon=True).start()
+    _updates(); _popular()          # warm the caches at boot
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"[rt2] {ADDON_NAME} v{VERSION} | series={len(SERIES)} "
