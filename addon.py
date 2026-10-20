@@ -2395,8 +2395,53 @@ def _auto_refresh():
         time.sleep(gap)
 
 
+def _catalog_refresh():
+    """Finds shows missing from the catalog and adds them, so Home/Search
+    stop missing anime that's on the site but never made it into our
+    crawled snapshot. _auto_refresh above only revisits shows already in
+    SHOWS; this is the piece that discovers shows we don't have yet.
+
+    Two passes, both merged into the live SHOWS dict without a restart
+    (existing shows/posters untouched):
+      - recent (every CATALOG_REFRESH_SECONDS, default 6h): RSS feed +
+        home page only, fast, catches brand-new uploads.
+      - full backfill (every CATALOG_FULL_REFRESH_SECONDS, default 24h):
+        ALSO walks the whole /hindi/page/N/ archive from page 1, so shows
+        that are weeks/months old and simply never got crawled in the
+        first place (the original gap, not just a freshness gap) get
+        picked up too. Slower, so it runs less often."""
+    gap = float(os.environ.get("CATALOG_REFRESH_SECONDS", str(6 * 3600)))
+    full_gap = float(os.environ.get("CATALOG_FULL_REFRESH_SECONDS", str(24 * 3600)))
+    if gap <= 0:
+        return
+    time.sleep(120)
+    last_full = 0.0
+    first = True
+    while True:
+        try:
+            import refresh_index
+            do_full = full_gap > 0 and (first or time.time() - last_full >= full_gap)
+            first = False
+            if do_full:
+                last_full = time.time()
+            before = len(SHOWS)
+            summary = refresh_index.run(quiet=True, full=do_full)
+            global ROWS
+            ROWS = _load_jsonl(os.path.join(BASE_DIR, "episodes_index.jsonl"))
+            with STORE_LOCK:
+                _build_shows()
+            added = len(SHOWS) - before
+            if added or summary:
+                print(f"[rt2] catalog refresh ({'full' if do_full else 'recent'}): "
+                      f"+{added} new shows", flush=True)
+        except Exception as e:
+            print("[rt2] catalog refresh failed:", e, flush=True)
+        time.sleep(gap)
+
+
 def main():
     threading.Thread(target=_auto_refresh, daemon=True).start()
+    threading.Thread(target=_catalog_refresh, daemon=True).start()
     _updates(); _popular()          # warm the caches at boot
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)

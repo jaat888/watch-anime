@@ -51,7 +51,13 @@ def is_real_hub(u):
     return p.startswith("/hindi/")
 
 
-def collect_targets(feed_pages):
+def collect_targets(feed_pages, full=False, max_pages=400):
+    """full=False (default): recent window only -> RSS feed + /home/ +
+    current/last month archive. Misses shows that are older than the feed
+    window and never got crawled in the first place.
+    full=True: ALSO walks the site's /hindi/page/N/ archive listing from
+    page 1 until an empty page, so older shows that were never crawled at
+    all get picked up too (one-time/periodic backfill, slower)."""
     cand, feed = set(), []
     for page in range(1, feed_pages + 1):
         r = requests.get(f"{SITE}/feed/?paged={page}", headers=UA, timeout=30)
@@ -69,19 +75,35 @@ def collect_targets(feed_pages):
             cand |= set(re.findall(r'href="' + SITE + r'(/hindi/[^"]+?)/?"', r.text))
         except requests.RequestException:
             pass
+    if full:
+        for page in range(1, max_pages + 1):
+            url = f"{SITE}/hindi/" if page == 1 else f"{SITE}/hindi/page/{page}/"
+            try:
+                r = requests.get(url, headers=UA, timeout=30)
+            except requests.RequestException:
+                break
+            if r.status_code == 404:
+                break
+            found = set(re.findall(r'href="' + SITE + r'(/hindi/[^"]+?)/?"', r.text))
+            found.discard("/hindi")
+            if not found:
+                break
+            cand |= found
+            time.sleep(0.2)
     cand = {SITE + c for c in cand}
     cand |= set(feed)
     return cand, feed
 
 
-def run(feed_pages=12, quiet=False):
+def run(feed_pages=12, quiet=False, full=False):
     """Refresh the index; returns a summary dict. Never raises for network
-    problems (they are reported as 'fails')."""
+    problems (they are reported as 'fails'). full=True also walks the whole
+    /hindi/ archive to backfill older shows the feed-only crawl never saw."""
     def log(*a):
         if not quiet:
             print(*a, flush=True)
 
-    cand, feed = collect_targets(feed_pages)
+    cand, feed = collect_targets(feed_pages, full=full)
 
     streams = json.loads((ROOT / "streams.json").read_text())
     hub_keys = {strong(h["url"]) for h in streams["hub_pages"]}
@@ -180,8 +202,12 @@ def run(feed_pages=12, quiet=False):
 
 
 def main():
-    feed_pages = int(sys.argv[1]) if len(sys.argv) > 1 else 12
-    run(feed_pages)
+    args = sys.argv[1:]
+    full = "--full" in args
+    if full:
+        args.remove("--full")
+    feed_pages = int(args[0]) if args else 12
+    run(feed_pages, full=full)
 
 
 if __name__ == "__main__":

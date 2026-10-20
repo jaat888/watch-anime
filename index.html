@@ -82,7 +82,6 @@ footer{text-align:center;color:var(--dim);font-size:13px;padding:30px 16px 96px}
 </header>
 <main id="app"></main>
 <nav class="nav" id="nav"></nav>
-<footer>Need help? Message <a href="https://t.me/mollad_jaat" target="_blank" rel="noopener">@mollad_jaat</a> on Telegram</footer>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
 <script>
 "use strict";
@@ -105,7 +104,7 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("/sw.js").catch(
 
 /* ---------- bottom navigation ---------- */
 function drawNav(){const cur=location.hash.replace(/^#\/?/,"").split("/")[0];
-  const items=[["home","⌂","Home",()=>{$q.value="";filter="all";lang="all";go("#/");route()}],["list","♥","My List",()=>go("#/list")],["req","✉","Request",requestModal],["acct","☺","Account",()=>ME?accountModal():authModal()]];
+  const items=[["home","⌂","Home",()=>{$q.value="";filter="all";lang="all";go("#/");route()}],["list","♥","My List",()=>go("#/list")],["acct","☺","Account",()=>ME?accountModal():authModal()]];
   $nav.replaceChildren(...items.map(([k,i,l,f])=>h("button",{class:(k==="home"&&!["list","show","watch"].includes(cur))||k===cur?"on":"",onclick:f},h("span",{},i),l)))}
 
 /* ---------- account ---------- */
@@ -114,10 +113,9 @@ async function loadMe(){if(store.get("token")){try{const j=await api("/api/me");
 function modal(...kids){const m=h("div",{class:"modal",onclick:e=>{if(e.target===m)m.remove()}},h("div",{class:"box"},...kids));document.body.append(m);return m}
 function authModal(){let mode="login";
   const u=h("input",{class:"in",placeholder:"Username",autocomplete:"username"}),p=h("input",{class:"in",type:"password",placeholder:"Password",autocomplete:"current-password"}),err=h("div",{class:"err"});
-  const forgot=h("a",{href:"https://t.me/mollad_jaat",target:"_blank",rel:"noopener",style:"font-size:13px;color:var(--accent)"},"Forgot password? Message @mollad_jaat on Telegram");
   const title=h("b",{style:"font-size:18px"},"Sign in"),sw=h("button",{class:"back",style:"margin:0"},"New here? Create an account"),ok=h("button",{class:"pri"},"Sign in");
-  const m=modal(title,u,p,err,ok,sw,forgot);
-  sw.onclick=()=>{forgot.style.display=mode==="login"?"none":"";mode=mode==="login"?"signup":"login";title.textContent=ok.textContent=mode==="login"?"Sign in":"Create account";sw.textContent=mode==="login"?"New here? Create an account":"Have an account? Sign in"};
+  const m=modal(title,u,p,err,ok,sw);
+  sw.onclick=()=>{mode=mode==="login"?"signup":"login";title.textContent=ok.textContent=mode==="login"?"Sign in":"Create account";sw.textContent=mode==="login"?"New here? Create an account":"Have an account? Sign in"};
   ok.onclick=async()=>{err.textContent="";try{const j=await api("/api/"+mode,{username:u.value.trim(),password:p.value});store.set("token",j.token);m.remove();await loadMe();route()}catch(e){err.textContent=e.message}};
   p.onkeydown=e=>{if(e.key==="Enter")ok.click()};u.focus()}
 function accountModal(){
@@ -128,11 +126,6 @@ function accountModal(){
   inst.onclick=async()=>{if(installEvt){installEvt.prompt();installEvt=null}else alert("To install: open your browser menu and choose “Add to Home screen” (on iPhone: Share → Add to Home Screen).")};
   const m=modal(h("b",{style:"font-size:18px"},ME.username),o,n,msg,save,inst,
     h("button",{class:"btn",onclick:async()=>{try{await api("/api/logout",{})}catch(e){}store.del("token");ME=null;PROG=[];FAVS=[];m.remove();go("#/");route()}},"Sign out"))}
-function requestModal(){
-  const n=h("input",{class:"in",placeholder:"Anime name",maxlength:"120"});
-  const m=modal(h("b",{style:"font-size:18px"},"Request an anime"),h("div",{class:"sub"},"Tell us what is missing. This opens Telegram with your message ready to send to @mollad_jaat."),n,
-    h("button",{class:"pri",onclick:()=>{if(!n.value.trim())return;window.open("https://t.me/mollad_jaat?text="+encodeURIComponent("Anime request: "+n.value.trim()+(ME?" (user: "+ME.username+")":"")),"_blank");m.remove()}},"Send on Telegram"));n.focus()}
-
 /* ---------- data ---------- */
 async function loadShows(){if(SHOWS)return;$app.replaceChildren(h("p",{class:"muted"},"Loading…"));const j=await api("/api/shows");SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[]}
 const bySlug=s=>SHOWS.find(x=>x.slug===s);
@@ -225,9 +218,16 @@ async function watchPage(slug,season,episode){killPlayer();const tok=WTOK,alive=
   const msg=h("div",{class:"msg"},"Finding the best stream… this can take 10–20 seconds."),langBox=h("div",{class:"chips"}),sels=h("div",{class:"sels"}),nav=h("div",{class:"chips"}),box=h("div",{class:"player"},video,buf,msg);
   const dlBar=h("i"),dlLabel=h("div",{class:"sub"},""),dlBtn=h("button",{class:"btn"},"⬇ Download this episode");
   const auto=h("input",{type:"checkbox",checked:store.get("auto")!=="0",onchange:e=>store.set("auto",e.target.checked?"1":"0")});
+  const seek=d=>{if(!video.duration)return;video.currentTime=Math.max(0,Math.min(video.duration,video.currentTime+d))};
+  const seekRow=h("div",{class:"chips",style:"margin:10px 0"},
+    h("button",{class:"chip",onclick:()=>seek(-10)},"⏪ 10s"),
+    h("button",{class:"chip",onclick:()=>seek(-0.1)},"⏪ 0.1s"),
+    h("button",{class:"chip",onclick:()=>seek(0.1)},"0.1s ⏩"),
+    h("button",{class:"chip",onclick:()=>seek(10)},"10s ⏩"));
+  const syncSub=h("div",{class:"sub",style:"margin-top:4px"},"Audio/video slightly off? Use the 0.1s buttons above to nudge playback into sync — video and audio are one file here, so a fine seek is the precise way to re-align them.");
   const title=s.movie?s.name:s.name+" · S"+season+" E"+episode;
-  $app.replaceChildren(h("button",{class:"back",onclick:()=>go("#/show/"+slug)},"← "+s.name),h("h2",{style:"margin:0 0 12px;font-size:19px"},title),box,
-    h("div",{class:"panel"},h("div",{},h("div",{class:"lbl"},"Language"),langBox),sels,h("label",{class:"chk"},auto,"Play next episode automatically"),h("div",{},dlBtn,h("div",{class:"dl",style:"margin-top:10px"},dlBar),dlLabel)),nav,epBox);
+  $app.replaceChildren(h("button",{class:"back",onclick:()=>go("#/show/"+slug)},"← "+s.name),h("h2",{style:"margin:0 0 12px;font-size:19px"},title),box,seekRow,syncSub,
+    h("div",{class:"panel"},h("div",{},h("div",{class:"lbl"},"Language / Stream — tap to switch"),langBox),sels,h("label",{class:"chk"},auto,"Play next episode automatically"),h("div",{},dlBtn,h("div",{class:"dl",style:"margin-top:10px"},dlBar),dlLabel)),nav,epBox);
   let nextEp=null;
   function drawEps(vids){
     if(!vids.length)return;
