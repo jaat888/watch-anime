@@ -93,6 +93,11 @@ footer{text-align:center;color:var(--dim);font-size:13px;padding:30px 16px 96px}
 <main id="app"></main>
 <nav class="nav" id="nav"></nav>
 <script>
+/* old TV Chrome (< 86) cannot run hls.js 1.x reliably -> use the legacy 0.14 build there */
+(function(){var old=!Element.prototype.replaceChildren;window.OLD_BROWSER=old;
+document.write('<scr'+'ipt src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/'+(old?'0.14.17':'1.5.13')+'/hls.min.js"></scr'+'ipt>')})();
+</script>
+<script>
 /* polyfills for old browsers (TV Chrome < 86) */
 (function(){
 var E=Element.prototype,D=Document.prototype,F=DocumentFragment.prototype;
@@ -110,15 +115,16 @@ def(Array.prototype,"includes",function(v){return this.indexOf(v)>-1});
 if(!Object.entries)Object.entries=function(o){return Object.keys(o).map(function(k){return[k,o[k]]})};
 if(!window.Promise||!window.fetch){document.title="Browser too old"}
 /* show any script error on screen so it is easy to debug on a TV */
-window.addEventListener("error",function(e){var a=document.getElementById("app");if(a&&!a.firstChild){var p=document.createElement("p");p.style.cssText="padding:16px;color:#c00;font:14px monospace";p.textContent="Error: "+e.message+" (line "+e.lineno+")";a.appendChild(p)}});
+function showErr(t){var m=document.querySelector(".player .msg");if(m){m.style.display="flex";m.textContent=t}}
+window.addEventListener("unhandledrejection",function(e){showErr("Error: "+((e.reason&&e.reason.message)||e.reason))});
+window.addEventListener("error",function(e){showErr("Error: "+e.message+" (line "+e.lineno+")");var a=document.getElementById("app");if(a&&!a.firstChild){var p=document.createElement("p");p.style.cssText="padding:16px;color:#c00;font:14px monospace";p.textContent="Error: "+e.message+" (line "+e.lineno+")";a.appendChild(p)}});
 })();
 </script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
 <script>
 "use strict";
 const $app=document.getElementById("app"),$q=document.getElementById("q"),$nav=document.getElementById("nav");
 let SHOWS=null,NOW=0,POP=[],filter="all",lang="all",genre="all",shown=60,hls=null,ME=null,PROG=[],FAVS=[],saveTimer=null,heroTimer=null,nextTimer=null,installEvt=null;
-const META={};
+const META={},INFO={};
 const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}},del(k){try{localStorage.removeItem(k)}catch(e){}}};
 function h(tag,a,...kids){const el=document.createElement(tag);for(const[k,v]of Object.entries(a||{})){if(k==="class")el.className=v;else if(k.startsWith("on"))el.addEventListener(k.slice(2),v);else if(v===true)el.setAttribute(k,"");else if(v!==false&&v!=null)el.setAttribute(k,v)}for(const c of kids.flat())if(c!=null)el.append(c.nodeType?c:document.createTextNode(c));return el}
 async function api(url,body){const o={headers:{}},t=store.get("token");if(t)o.headers.Authorization="Bearer "+t;
@@ -161,7 +167,7 @@ function accountModal(){
 async function loadShows(){if(SHOWS)return;$app.replaceChildren(h("p",{class:"muted"},"Loading…"));const j=await api("/api/shows");SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[]}
 const bySlug=s=>SHOWS.find(x=>x.slug===s);
 const isNew=s=>s.upd&&NOW-s.upd<7*86400;
-async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<120000)return c.v;let v=[];try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[]}catch(e){}if(v.length||s.movie)META[s.slug]={t:Date.now(),v};else if(c)return c.v;return v}
+async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<120000)return c.v;let v=[];try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie)META[s.slug]={t:Date.now(),v};else if(c)return c.v;return v}
 function posterEl(s){const f=()=>h("div",{class:"ph"},(s.name[0]||"?").toUpperCase());if(!s.poster)return f();
   const i=h("img",{class:"poster",loading:"lazy",alt:"",referrerpolicy:"no-referrer",src:s.poster});i.onerror=()=>i.replaceWith(f());return i}
 function card(s,pct,onclick){return h("button",{class:"card",onclick:onclick||(()=>go("#/show/"+s.slug))},posterEl(s),isNew(s)&&pct==null?h("div",{class:"badge"},"NEW"):null,pct!=null?h("div",{class:"prog"},h("i",{style:"width:"+pct+"%"})):null,h("div",{class:"t"},s.name))}
@@ -238,6 +244,7 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
   const kids=[h("button",{class:"back",onclick:()=>history.length>1?history.back():go("#/")},"← Back"),
     h("div",{class:"top"},h("div",{class:"bg",style:bgStyle(s)}),h("div",{class:"detail"},posterEl(s),h("div",{},h("h1",{},s.name),h("div",{class:"muted"},(s.movie?"Movie":vids.length+" episodes")+((s.langs||[]).length?" · "+s.langs.join(", "):"")),
       h("div",{class:"row2",style:"margin-top:12px"},play,fav))))];
+  const inf=INFO[slug];if(inf&&(inf.d||(s.genres||inf.g||[]).length)){const gl=(s.genres&&s.genres.length?s.genres:inf.g)||[];kids.push(h("div",{style:"margin:14px 0 4px"},gl.length?h("div",{class:"chips"},gl.map(g=>h("span",{class:"tag",style:"background:var(--panel2);color:var(--text)"},g))):null,inf.d?h("p",{style:"margin:10px 0 0;line-height:1.55"},inf.d):null))}
   if(sibs.length)kids.push(h("div",{class:"lbl",style:"margin-top:4px"},"Other seasons/parts"),
     h("div",{class:"chips"},sibs.map(x=>h("button",{class:"chip",onclick:()=>go("#/show/"+x.slug)},x.name))));
   if(!s.movie){const se={};vids.forEach(v=>(se[v.season]=se[v.season]||[]).push(v));

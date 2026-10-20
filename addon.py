@@ -152,30 +152,33 @@ def _display(show):
 
 SHOWS = {}
 
-# slug -> {"g": [genre names...], "t": epoch}; loaded before _build_shows()
-# runs so the very first /api/shows already carries whatever we cached
-# on a previous run.
+# slug -> {"v":2, "g": [genres], "d": overview, "t": epoch, "nf": not-found}
+# Stored in SQL (accounts.tmdb) so it survives restarts/redeploys; loaded
+# before _build_shows() so the first /api/shows already has genres.
 _tmdb_lock = threading.Lock()
 _TMDB_CACHE = {}
+_TMDB_FAIL = {}          # slug -> time of last failed lookup (memory only)
+TMDB_RETRY = 600         # retry a failed lookup after ~10 min
+TMDB_NF_TTL = 24 * 3600  # "TMDB has no such title" is rechecked daily
 
 
 def _tmdb_load_cache():
     global _TMDB_CACHE
     try:
-        with open(TMDB_CACHE_FILE, encoding="utf-8") as fh:
-            _TMDB_CACHE = json.load(fh)
-    except Exception:
+        _TMDB_CACHE = accounts.tmdb_all()
+    except Exception as e:
+        print(f"[rt2] tmdb cache load failed: {repr(e)}", flush=True)
         _TMDB_CACHE = {}
 
 
-def _tmdb_save_cache():
+def _tmdb_store(slug, info):
+    """Save one successful lookup (memory + SQL).  Never called on failure."""
+    with _tmdb_lock:
+        _TMDB_CACHE[slug] = info
     try:
-        tmp = TMDB_CACHE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(_TMDB_CACHE, fh)
-        os.replace(tmp, TMDB_CACHE_FILE)
-    except Exception:
-        pass
+        accounts.tmdb_set(slug, info)
+    except Exception as e:
+        print(f"[rt2] tmdb save failed for {slug}: {repr(e)}", flush=True)
 
 
 _tmdb_load_cache()
@@ -200,6 +203,7 @@ def _build_shows():
         rec["movie"] = all((k[0] or 0) == 0 for k in rec["eps"]) if rec["eps"] else False
         rec["poster"] = rec["poster"] or POSTERS.get(rec["site_name"], "")
         rec["genres"] = _TMDB_CACHE.get(rec["slug"], {}).get("g", [])
+        rec["desc"] = _TMDB_CACHE.get(rec["slug"], {}).get("d", "")
 
 
 _build_shows()
@@ -901,9 +905,9 @@ def _fetch_poster(rec):
 
 
 # ------------------------------------------------------------- TMDB ---
-# Genre lookup.  The crawled index has no genre field at all (the site
-# itself doesn't tag genres), so we ask TMDB by title and cache the
-# result forever (genres for a given show practically never change).
+# Genres + description.  The crawled index has neither, so we ask TMDB by
+# (cleaned) title.  Successful lookups are cached in SQL; failures are NOT
+# cached (retried after ~10 min).
 _TMDB_GENRE_MAP = {}      # {"tv": {id: name}, "movie": {id: name}}
 
 
@@ -916,85 +920,125 @@ def _tmdb_get(path, **params):
 
 
 def _tmdb_genre_map(kind):
-    """kind: 'tv' or 'movie'.  {id: name}, cached in memory for the
-    process lifetime (TMDB's genre list is effectively static)."""
-    if kind in _TMDB_GENRE_MAP:
-        return _TMDB_GENRE_MAP[kind]
-    try:
-        j = _tmdb_get(f"/genre/{kind}/list")
-        m = {g["id"]: g["name"] for g in j.get("genres", [])}
-    except Exception as e:
-        print(f"[rt2] tmdb genre_map FAILED: {repr(e)}", flush=True)
-        m = {}
+    """{id: name}.  Only a NON-empty map is remembered; on failure this
+    raises so nothing wrong gets cached."""
+    m = _TMDB_GENRE_MAP.get(kind)
+    if m:
+        return m
+    j = _tmdb_get(f"/genre/{kind}/list")
+    m = {g["id"]: g["name"] for g in j.get("genres", [])}
+    if not m:
+        raise RuntimeError("empty genre map")
     _TMDB_GENRE_MAP[kind] = m
     return m
 
 
-def _tmdb_lookup_genres(name, is_movie):
-    """One TMDB search call -> genre names for the closest-titled result,
-    or [] if nothing matched / the request failed."""
+def _tmdb_clean(name):
+    """'High School DxD Season 1 (Hindi Dub)' -> 'High School DxD'."""
+    s = re.sub(r"[\[(][^\])]*[\])]", " ", name or "")
+    s = re.sub(r"\b\d+(?:st|nd|rd|th)\s+season\b.*$", " ", s, flags=re.I)
+    s = re.sub(r"\b(?:season|part|cour)\s*\d+\b.*$", " ", s, flags=re.I)
+    s = re.sub(r"\b(?:final\s+season|hindi|tamil|telugu|bengali|dubbed|dub|subbed|dual\s+audio|multi\s+audio)\b", " ", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" -:\u2013\u2014|,.")
+    return s or (name or "")
+
+
+def _tmdb_lookup(name, is_movie):
+    """-> {"v":2,"g":[...],"d":"...","t":ts[, "nf":1]}.  RAISES on any
+    network/API failure so the caller can skip caching."""
+    kind = "movie" if is_movie else "tv"
+    results = []
+    for query in dict.fromkeys([_tmdb_clean(name), name]):
+        if not query:
+            continue
+        results = _tmdb_get(f"/search/{kind}", query=query).get("results") or []
+        if results:
+            break
+    if not results:
+        return {"v": 2, "g": [], "d": "", "t": time.time(), "nf": 1}
+    top = results[:10]
+    anim = [r for r in top if 16 in (r.get("genre_ids") or [])]   # 16 = Animation
+    pool = anim or top
+    best = next((r for r in pool if r.get("overview")), pool[0])
+    ids = best.get("genre_ids") or []
+    gm = _tmdb_genre_map(kind) if ids else {}
+    return {"v": 2, "g": [gm[i] for i in ids if i in gm],
+            "d": (best.get("overview") or "").strip(), "t": time.time()}
+
+
+def _tmdb_fresh(hit):
+    if not hit or hit.get("v") != 2:      # old/empty entries -> refetch
+        return False
+    ttl = TMDB_NF_TTL if hit.get("nf") else TMDB_TTL
+    return time.time() - hit.get("t", 0) < ttl
+
+
+def _tmdb_refresh(rec):
+    """Do one lookup now; on success store it, on failure remember the
+    time only in memory (retry in ~10 min).  Returns True on success."""
+    slug = rec["slug"]
     try:
-        kind = "movie" if is_movie else "tv"
-        j = _tmdb_get(f"/search/{kind}", query=name)
-        results = j.get("results") or []
-        if not results:
-            return []
-        gm = _tmdb_genre_map(kind)
-        ids = results[0].get("genre_ids") or []
-        return [gm[i] for i in ids if i in gm]
+        info = _tmdb_lookup(rec.get("name") or rec.get("site_name") or slug,
+                            bool(rec.get("movie")))
     except Exception as e:
-        print(f"[rt2] tmdb lookup FAILED for '{name}': {repr(e)}", flush=True)
-        return []
+        _TMDB_FAIL[slug] = time.time()
+        print(f"[rt2] tmdb lookup FAILED for '{slug}': {repr(e)}", flush=True)
+        return False
+    _TMDB_FAIL.pop(slug, None)
+    _tmdb_store(slug, info)
+    rec["genres"], rec["desc"] = info["g"], info["d"]
+    return True
+
+
+def _show_info(rec, wait=0):
+    """Cached {"g","d"} for a show.  On a miss starts a background TMDB
+    lookup (optionally waits up to `wait` seconds for it)."""
+    slug = rec["slug"]
+    hit = _TMDB_CACHE.get(slug)
+    if _tmdb_fresh(hit):
+        return hit
+    if time.time() - _TMDB_FAIL.get(slug, 0) < TMDB_RETRY:
+        return hit or {}
+    done = threading.Event()
+
+    def _run(rec=rec):
+        try:
+            _tmdb_refresh(rec)
+        finally:
+            done.set()
+    _bg_once(("tmdb", slug), _run)
+    if wait:
+        done.wait(wait)
+    return _TMDB_CACHE.get(slug) or {}
 
 
 def _show_genres(rec):
-    """Cached genres for a show record; kicks off a background TMDB
-    lookup on a cache miss/stale entry and returns what we have *now*
-    (possibly []) so callers never block on the network."""
-    slug = rec["slug"]
-    hit = _TMDB_CACHE.get(slug)
-    now = time.time()
-    if hit and now - hit.get("t", 0) < TMDB_TTL:
-        return hit.get("g", [])
-
-    def _run(rec=rec, slug=slug):
-        g = _tmdb_lookup_genres(rec.get("name") or rec.get("site_name") or slug,
-                                 bool(rec.get("movie")))
-        with _tmdb_lock:
-            _TMDB_CACHE[slug] = {"g": g, "t": time.time()}
-            _tmdb_save_cache()
-        rec["genres"] = g
-    _bg_once(("tmdb", slug), _run)
-    return hit.get("g", []) if hit else []
+    return _show_info(rec).get("g", [])
 
 
 def _tmdb_backfill():
-    """One-time (then daily) pass so every show gets a genre without
-    waiting for someone to open its page first.  Paced to stay well
-    under TMDB's rate limit."""
+    """Keeps every show (including newly crawled ones) filled in: checks
+    every 10 min for shows with no/stale/old-format cache, paced ~3 req/s."""
     if not TMDB_API_KEY:
         return
     time.sleep(30)
     while True:
-        with STORE_LOCK:
-            todo = [r for r in SHOWS.values()
-                    if time.time() - _TMDB_CACHE.get(r["slug"], {}).get("t", 0) >= TMDB_TTL]
-        n = 0
-        for rec in todo:
-            g = _tmdb_lookup_genres(rec.get("name") or rec.get("site_name") or rec["slug"],
-                                     bool(rec.get("movie")))
-            with _tmdb_lock:
-                _TMDB_CACHE[rec["slug"]] = {"g": g, "t": time.time()}
-            rec["genres"] = g
-            n += 1
-            if n % 20 == 0:
-                with _tmdb_lock:
-                    _tmdb_save_cache()
-            time.sleep(0.3)   # ~3 req/s, polite to TMDB's free tier
-        with _tmdb_lock:
-            _tmdb_save_cache()
-        print(f"[rt2] tmdb genre backfill: {n} shows updated", flush=True)
-        time.sleep(24 * 3600)
+        try:
+            now = time.time()
+            with STORE_LOCK:
+                todo = [r for r in SHOWS.values()
+                        if not _tmdb_fresh(_TMDB_CACHE.get(r["slug"]))
+                        and now - _TMDB_FAIL.get(r["slug"], 0) >= TMDB_RETRY]
+            n = 0
+            for rec in todo:
+                if _tmdb_refresh(rec):
+                    n += 1
+                time.sleep(0.3)
+            if todo:
+                print(f"[rt2] tmdb backfill: {n}/{len(todo)} shows updated", flush=True)
+        except Exception as e:
+            print(f"[rt2] tmdb backfill error: {repr(e)}", flush=True)
+        time.sleep(600)
 
 
 def _site_search_slug(title, want_movie):
@@ -1356,15 +1400,17 @@ def handle_meta(mtype, mid):
             except Exception:
                 pass
         _bg_once(("prewarm-movie", slug), _prewarm)
+    info = _show_info(rec, wait=3)
     meta = {
         "id": mid,
         "type": mtype,
         "name": rec["name"],
         "poster": rec["poster"] or None,
         "background": rec["poster"] or None,
-        "description": (f"{rec['name']} - every language the site "
+        "description": info.get("d") or (f"{rec['name']} - every language the site "
                         "carries, streamed in-app as multi-quality HLS."),
-        "genres": _show_genres(rec) or ["Animation"],
+        "overview": info.get("d") or "",
+        "genres": info.get("g") or ["Animation"],
         "videos": [],
     }
     if not rec["movie"]:

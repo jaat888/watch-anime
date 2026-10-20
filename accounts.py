@@ -22,6 +22,7 @@ SCHEMA = [
  "CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT)",
  "CREATE TABLE IF NOT EXISTS favs(user_id INTEGER, slug TEXT, added REAL, PRIMARY KEY(user_id, slug))",
  "CREATE TABLE IF NOT EXISTS seen(user_id INTEGER, slug TEXT, eps TEXT, PRIMARY KEY(user_id, slug))",
+ "CREATE TABLE IF NOT EXISTS tmdb(slug TEXT PRIMARY KEY, v TEXT)",
 ]
 
 def _rows(resp):
@@ -175,6 +176,19 @@ def kv_get(k):
 
 def kv_set(k, v):
     q("INSERT OR REPLACE INTO kv VALUES(?,?)", (k, v))
+
+# ---- TMDB info cache (genres + description), kept in SQL so restarts keep it ----
+def tmdb_all():
+    out = {}
+    for slug, v in q("SELECT slug, v FROM tmdb"):
+        try:
+            out[slug] = json.loads(v)
+        except Exception:
+            pass
+    return out
+
+def tmdb_set(slug, obj):
+    q("INSERT OR REPLACE INTO tmdb VALUES(?,?)", (slug, json.dumps(obj, separators=(",", ":"))))
 
 # ---- favourites, watched episodes, password change, popularity ----
 def set_fav(uid, slug, on):
