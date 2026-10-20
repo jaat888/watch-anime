@@ -233,7 +233,7 @@ window.addEventListener("error",function(e){showErr("Error: "+e.message+" (line 
 <script>
 "use strict";
 const $app=document.getElementById("app"),$q=document.getElementById("q"),$nav=document.getElementById("nav");
-let SHOWS=null,NOW=0,POP=[],filter="all",lang="all",genre="all",shown=60,hls=null,ME=null,PROG=[],FAVS=[],saveTimer=null,heroTimer=null,nextTimer=null,installEvt=null;
+let SHOWS=null,NOW=0,POP=[],TREND=[],TRENDD=[],filter="all",lang="all",genre="all",shown=60,hls=null,ME=null,PROG=[],FAVS=[],saveTimer=null,heroTimer=null,nextTimer=null,installEvt=null;
 const META={},INFO={};
 const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}},del(k){try{localStorage.removeItem(k)}catch(e){}}};
 function h(tag,a,...kids){const el=document.createElement(tag);for(const[k,v]of Object.entries(a||{})){if(k==="class")el.className=v;else if(k.startsWith("on"))el.addEventListener(k.slice(2),v);else if(v===true)el.setAttribute(k,"");else if(v!==false&&v!=null)el.setAttribute(k,v)}for(const c of kids.flat())if(c!=null)el.append(c.nodeType?c:document.createTextNode(c));return el}
@@ -281,7 +281,7 @@ const skCard=()=>h("div",{class:"card sk-card"},h("div",{class:"pw sk"}),h("div"
 const skRail=()=>[h("h2",{class:"sec"},h("span",{class:"sk sk-h"})),h("div",{class:"rail"},[1,2,3,4,5].map(skCard))];
 const skHome=()=>[h("div",{class:"hero sk","aria-busy":"true"}),...skRail(),...skRail()];
 const skShow=()=>[h("div",{class:"back"},"\u00a0"),h("div",{class:"hero sk",style:"min-height:230px"}),h("h2",{class:"sec"},h("span",{class:"sk sk-h"})),h("div",{class:"eps"},Array.from({length:14},()=>h("div",{class:"ep sk"})))];
-async function loadShows(){if(SHOWS)return;$app.replaceChildren(...skHome());const j=await api("/api/shows");SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[]}
+async function loadShows(){if(SHOWS)return;$app.replaceChildren(...skHome());const j=await api("/api/shows");SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[]}
 const bySlug=s=>SHOWS.find(x=>x.slug===s);
 const isNew=s=>s.upd&&NOW-s.upd<7*86400;
 async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<120000)return c.v;let v=[];try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie)META[s.slug]={t:Date.now(),v};else if(c)return c.v;return v}
@@ -334,8 +334,14 @@ function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=t
   const latest=[...fresh,...recent].slice(0,20);
   const kids=[];
   if(!browsing){
-    const heroItems=[...cont.slice(0,1),...latest.filter(s=>s.poster).slice(0,4).map(s=>({s}))];
+    const mapT=a=>a.map(bySlug).filter(Boolean),trendD=mapT(TRENDD);
+    let trend=mapT(TREND.length?TREND:POP);
+    if(trend.length<30){const have=new Set(trend.map(s=>s.slug));trend=trend.concat(SHOWS.filter(s=>A(s)&&s.poster&&!have.has(s.slug)).sort((a,b)=>(b.rating||0)-(a.rating||0)||b.ord-a.ord).slice(0,30-trend.length))}
+    const trendP=trend.filter(s=>s.poster);
+    const heroItems=[...cont.slice(0,1),...(trendP.length>=3?trendP:latest.filter(s=>s.poster)).slice(0,6).map(s=>({s}))];
     if(heroItems.length)kids.push(heroEl(heroItems));
+    if(trendD.length>=4)kids.push(...rail("⚡ Trending today",trendD.slice(0,60)));
+    if(trend.length>=4)kids.push(...rail("🚀 Trending this week",trend.slice(0,80)));
     kids.push(...rail("🔥 Latest episodes",fresh.slice(0,20),null,epCard));
     if(ME)kids.push(...rail("▶ Continue watching",cont.slice(0,15),null,({p,s})=>card(s,p.dur?Math.min(100,p.pos/p.dur*100):0,()=>go(resumeLink(s,p).slice(1)))));
     if(ME)kids.push(...rail("❤ My List",FAVS.map(bySlug).filter(Boolean).slice(0,20),()=>go("#/list")));
@@ -501,7 +507,7 @@ function openSearch(){if(document.querySelector(".so")||!SHOWS)return;
     if(!term){const rc=getRecent();
       if(rc.length)body.append(h("div",{class:"sohd"},"Recent searches",h("button",{onclick:()=>{setRecent([]);draw()}},"Clear")),
         h("div",{class:"rec"},rc.map(t=>h("span",{class:"chip"},h("span",{onclick:()=>{inp.value=t;draw()}},t),h("i",{onclick:()=>{setRecent(getRecent().filter(x=>x!==t));draw()}},"✕")))));
-      const pop=POP.map(bySlug).filter(Boolean).slice(0,8);
+      const pop=(TREND.length?TREND:POP).map(bySlug).filter(Boolean).slice(0,15);
       if(pop.length)body.append(h("div",{class:"sohd"},"Trending now"),...pop.map((s,i)=>row(s,"",i+1)));return}
     const hits=SHOWS.filter(s=>s.name.toLowerCase().includes(term)).sort((a,b)=>(b.name.toLowerCase().startsWith(term)-a.name.toLowerCase().startsWith(term))||b.ord-a.ord);
     if(!hits.length){body.append(h("p",{class:"muted",style:"text-align:center;margin-top:40px"},"No results for “"+inp.value.trim()+"”"));return}

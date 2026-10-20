@@ -1759,7 +1759,9 @@ def api_shows():
         if it["poster"].startswith("https://"):
             it["poster"] = "/img/s/" + it["slug"]      # short link; hides the source site
     items.sort(key=lambda x: x["name"].lower())
-    return {"shows": items, "now": int(time.time()), "popular": _popular()}
+    return {"shows": items, "now": int(time.time()), "popular": _popular(),
+            "trending": _trending("week"),
+            "trending_day": _trending("day")}
 
 
 _img_cache = {}
@@ -1803,6 +1805,124 @@ def _popular():
         threading.Thread(target=_run, daemon=True).start()
     return _pop_cache["data"]
 
+
+# ------------------------------------------- TMDB daily/weekly trending ---
+# TMDB trending (day + week; tv + movies; many pages) matched by title
+# against the shows we actually have (exact + fuzzy), then filled with
+# TMDB's most-popular Japanese animation.  Cached 1 h per window; failures
+# keep the last good list.
+TREND_TTL = _env_int("TREND_TTL", 3600)
+TREND_PAGES = _env_int("TREND_PAGES", 15)         # 20 titles per page per kind
+_trend_cache = {w: {"t": 0, "data": [], "busy": False} for w in ("day", "week")}
+
+
+def _tn_norm(s):
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def _tn_index():
+    with STORE_LOCK:
+        idx = {}
+        for rec in SHOWS.values():
+            for nm in (rec.get("name"), _tmdb_clean(rec.get("name"))):
+                k = _tn_norm(nm)
+                if k:
+                    lst = idx.setdefault(k, [])
+                    if rec["slug"] not in lst:
+                        lst.append(rec["slug"])
+    return idx
+
+
+def _tn_match(idx, keys, item):
+    """Slugs for one TMDB item: exact title first, then prefix/containment
+    (e.g. 'Attack on Titan' <-> 'Attack on Titan The Final Season')."""
+    names = [item.get(k) for k in ("name", "original_name", "title", "original_title")]
+    hit = []
+    for nm in names:
+        for slug in idx.get(_tn_norm(nm), []):
+            if slug not in hit:
+                hit.append(slug)
+    if hit:
+        return hit
+    for nm in names:
+        t = _tn_norm(nm)
+        if len(t) < 6:
+            continue
+        for k in keys:
+            if len(k) < 6:
+                continue
+            short, long_ = (t, k) if len(t) <= len(k) else (k, t)
+            if long_.startswith(short) and len(short) / len(long_) >= 0.55:
+                for slug in idx[k]:
+                    if slug not in hit:
+                        hit.append(slug)
+    return hit
+
+
+def _tmdb_trending_slugs(window):
+    """-> [slug, ...] ordered by TMDB trending rank (best first)."""
+    idx = _tn_index()
+    keys = list(idx)
+    out, seen = [], set()
+
+    def take(item):
+        for slug in _tn_match(idx, keys, item):
+            if slug not in seen:
+                seen.add(slug)
+                out.append(slug)
+
+    ok = False
+    pages = TREND_PAGES if window == "week" else max(8, TREND_PAGES // 2)
+    for page in range(1, pages + 1):
+        for kind in ("tv", "movie"):
+            try:
+                res = _tmdb_get(f"/trending/{kind}/{window}", page=page).get("results") or []
+            except Exception as e:
+                print(f"[rt2] tmdb trending {kind}/{window} p{page} failed: {repr(e)}", flush=True)
+                continue
+            ok = ok or bool(res)
+            anim = [r for r in res if 16 in (r.get("genre_ids") or [])]
+            for r in anim + [r for r in res if r not in anim]:
+                take(r)
+    # fill: most popular Japanese animation on TMDB right now
+    for kind in ("tv", "movie"):
+        for page in range(1, 7):
+            try:
+                res = _tmdb_get(f"/discover/{kind}", with_genres=16,
+                                with_original_language="ja",
+                                sort_by="popularity.desc", page=page).get("results") or []
+            except Exception as e:
+                print(f"[rt2] tmdb discover {kind} p{page} failed: {repr(e)}", flush=True)
+                continue
+            ok = ok or bool(res)
+            for r in res:
+                take(r)
+    if not ok:
+        raise RuntimeError("tmdb trending unavailable")
+    return out
+
+
+def _trending(window="week"):
+    """TMDB trending slugs first, then our own most-watched; never blocks."""
+    c = _trend_cache[window]
+    if time.time() - c["t"] > TREND_TTL and not c["busy"]:
+        c["busy"] = True
+
+        def _run():
+            try:
+                c.update(t=time.time(), data=_tmdb_trending_slugs(window))
+            except Exception as e:
+                print(f"[rt2] trending {window} refresh failed: {repr(e)}", flush=True)
+                c["t"] = time.time() - TREND_TTL + 300   # retry in 5 min
+            finally:
+                c["busy"] = False
+        threading.Thread(target=_run, daemon=True).start()
+    seen, out = set(), []
+    for slug in list(c["data"]) + list(_popular()):
+        if slug not in seen:
+            seen.add(slug)
+            out.append(slug)
+    return out
 
 _upd_cache = {"t": 0, "data": {}}
 
@@ -2706,7 +2826,7 @@ def main():
     threading.Thread(target=_auto_refresh, daemon=True).start()
     threading.Thread(target=_catalog_refresh, daemon=True).start()
     threading.Thread(target=_tmdb_backfill, daemon=True).start()
-    _updates(); _popular()          # warm the caches at boot
+    _updates(); _popular(); _trending("week"); _trending("day")   # warm the caches at boot
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"[rt2] {ADDON_NAME} v{VERSION} | series={len(SERIES)} "
