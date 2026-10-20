@@ -2,16 +2,18 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# addon ki dependencies (requests + curl_cffi)
+# Dependencies (requests + curl_cffi)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# addon + uska data
-COPY addon.py index.html episodes_index.jsonl posters.json ./
+# Copy every file of the repo, so a new file can never be left out again
+COPY . .
 
-# hosting platform PORT env deta hai; na de to 7700 chalega
+# The hosting platform provides PORT; defaults to 7700
 ENV PORT=7700 \
+    DB_PATH=/data/data.db \
     HOST_SUFFIX=""
+RUN mkdir -p /data
 EXPOSE 7700
 
 CMD ["python3", "-u", "addon.py"]
