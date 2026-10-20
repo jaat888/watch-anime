@@ -1407,6 +1407,42 @@ def handle_stream(mtype, mid):
                                      base, src="WN", kind=kind, qres=wq))
     return {"streams": streams}
 
+# ------------------------------------------------------ website API --------
+def api_shows():
+    """Compact list for the website grid (name, slug, poster, movie?)."""
+    with STORE_LOCK:
+        items = [{"slug": r["slug"], "name": r["name"],
+                  "poster": r.get("poster") or "", "movie": bool(r["movie"])}
+                 for r in SHOWS.values()]
+    items.sort(key=lambda x: x["name"].lower())
+    return {"shows": items}
+
+
+def api_watch(slug, season, episode):
+    """Playable sources for one episode/movie, simplified for the website."""
+    rec = SHOWS.get(slug)
+    if not rec:
+        return {"sources": [], "error": "unknown show"}
+    mid = f"raretoons2:{slug}"
+    if not rec["movie"] and season is not None:
+        mid += f":{int(season)}:{int(episode)}"
+    res = handle_stream("movie" if rec["movie"] else "series", mid)
+    out = []
+    for c in res.get("streams", []):
+        lines = (c.get("title") or "").split("\n")
+        ml = re.search(r"⌗\s*(.+)$", lines[0] if lines else "")
+        mq = re.search(r"(\d{3,4}p)", lines[-1] if lines else "")
+        is_mq = "MQ" in (c.get("name") or "")
+        url = c.get("url") or ""
+        if is_mq:
+            url = urlparse(url).path        # same-origin: no http/https mix
+        out.append({"lang": (ml.group(1).strip() if ml else "Default"),
+                    "kind": "mq" if is_mq else "direct",
+                    "quality": mq.group(1) if mq else "",
+                    "url": url})
+    return {"name": rec["name"], "sources": out}
+
+
 # ---------------------------------------------------- /mq HLS rewriter -----
 _B64_RE = r"[A-Za-z0-9_\-]"
 _URL_ATTR_RE = re.compile(r'URI="([^"]+)"')
@@ -1824,9 +1860,24 @@ class Handler(BaseHTTPRequestHandler):
         _public_base_holder["base"] = public_base_from(self)
         try:
             if path.rstrip("/") in ("", "/"):
+                try:
+                    with open(os.path.join(BASE_DIR, "index.html"), "rb") as fh:
+                        self._send_raw(fh.read(), "text/html; charset=utf-8")
+                except FileNotFoundError:
+                    self._send({"addon": ADDON_NAME, "version": VERSION,
+                                "status": "ok"})
+                return
+            if path == "/status":
                 self._send({"addon": ADDON_NAME, "version": VERSION,
                             "status": "ok", "series": len(SERIES),
                             "movies": len(MOVIES), "rows": len(ROWS)})
+                return
+            if path == "/api/shows":
+                self._send(api_shows())
+                return
+            m = re.match(r"^/api/watch/([a-z0-9_]+)(?:/(\d+)/(\d+))?$", path)
+            if m:
+                self._send(api_watch(m.group(1), m.group(2), m.group(3)))
                 return
             if path == "/manifest.json":
                 self._send(handle_manifest(_public_base_holder["base"]))

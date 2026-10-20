@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0f1117">
+<title>RareToons</title>
+<style>
+:root{--bg:#0f1117;--panel:#181b24;--line:#262b38;--text:#eef0f6;--dim:#9aa1b4;--accent:#ff6b4a;--accent2:#ffb347}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){--bg:#f6f4f0;--panel:#fff;--line:#e3dfd8;--text:#1b1d24;--dim:#6b7080;--accent:#e4472a;--accent2:#c77a12}
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:inherit}
+button{font:inherit;color:inherit;cursor:pointer}
+header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;gap:12px;align-items:center}
+.logo{font-weight:800;font-size:18px;letter-spacing:.3px;cursor:pointer;white-space:nowrap}
+.logo b{color:var(--accent)}
+#q{flex:1;min-width:0;background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:9px 12px;font:inherit}
+#q:focus{outline:2px solid var(--accent);outline-offset:1px}
+main{max-width:1100px;margin:0 auto;padding:16px}
+.tabs{display:flex;gap:8px;margin:0 0 14px}
+.tab{border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:6px 14px;font-size:14px}
+.tab[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;cursor:pointer;text-align:left;padding:0;display:block;width:100%}
+.card:hover{border-color:var(--accent)}
+.poster{aspect-ratio:2/3;width:100%;object-fit:cover;display:block;background:linear-gradient(135deg,#2a2f3f,#1a1d27)}
+.ph{aspect-ratio:2/3;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:var(--accent);background:linear-gradient(135deg,#2a2f3f,#1a1d27)}
+.card .t{padding:8px 10px;font-size:13px;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:3em}
+.more{display:block;margin:18px auto 0;padding:10px 22px;border-radius:10px;border:1px solid var(--line);background:var(--panel)}
+.muted{color:var(--dim)}
+.back{background:none;border:0;color:var(--dim);padding:0;margin-bottom:12px}
+.detail{display:grid;grid-template-columns:150px 1fr;gap:16px;align-items:start}
+@media (max-width:560px){.detail{grid-template-columns:100px 1fr}}
+.detail h1{margin:0 0 6px;font-size:22px}
+.season{margin:20px 0 8px;font-weight:700}
+.eps{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px}
+.ep{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px 0;text-align:center}
+.ep:hover,.ep.cur{border-color:var(--accent);color:var(--accent)}
+.primary{background:var(--accent);border:0;color:#fff;border-radius:10px;padding:10px 20px;font-weight:600}
+.player{background:#000;border-radius:12px;overflow:hidden;aspect-ratio:16/9;width:100%;position:relative}
+video{width:100%;height:100%;display:block;background:#000}
+.msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px;color:#fff;background:rgba(0,0,0,.65);font-size:14px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.chip{border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:6px 14px;font-size:14px}
+.chip[aria-pressed="true"]{border-color:var(--accent2);color:var(--accent2)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.note{font-size:12px;color:var(--dim);margin-top:18px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo" id="logo">Rare<b>Toons</b></div>
+  <input id="q" type="search" placeholder="Anime search karo..." autocomplete="off">
+</header>
+<main id="app"></main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script>
+"use strict";
+const $app = document.getElementById("app");
+const $q = document.getElementById("q");
+let SHOWS = null, filter = "all", shown = 60, hls = null;
+
+const store = {
+  get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
+  set(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
+};
+function h(tag, attrs, ...kids){
+  const el = document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs||{})){
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k,"");
+    else if (v !== false && v != null) el.setAttribute(k,v);
+  }
+  for (const c of kids.flat()) if (c != null) el.append(c.nodeType ? c : document.createTextNode(c));
+  return el;
+}
+async function jget(url){
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+function killPlayer(){ if (hls){ hls.destroy(); hls = null; } }
+function go(hash){ location.hash = hash; }
+
+async function loadShows(){
+  if (SHOWS) return;
+  $app.replaceChildren(h("p",{class:"muted"},"Loading..."));
+  SHOWS = (await jget("/api/shows")).shows;
+}
+
+/* ---------- home ---------- */
+function posterEl(s){
+  if (s.poster){
+    const img = h("img",{class:"poster",loading:"lazy",alt:"",referrerpolicy:"no-referrer",src:s.poster});
+    img.addEventListener("error",()=>img.replaceWith(h("div",{class:"ph"},(s.name[0]||"?").toUpperCase())));
+    return img;
+  }
+  return h("div",{class:"ph"},(s.name[0]||"?").toUpperCase());
+}
+function home(){
+  killPlayer();
+  const term = $q.value.trim().toLowerCase();
+  let list = SHOWS.filter(s => (filter==="all" || (filter==="movie")===s.movie) &&
+                               (!term || s.name.toLowerCase().includes(term)));
+  const tabs = h("div",{class:"tabs"},
+    [["all","All"],["series","Series"],["movie","Movies"]].map(([k,l]) =>
+      h("button",{class:"tab","aria-pressed":String(filter===k),onclick:()=>{filter=k;shown=60;home();}},l)));
+  const cards = list.slice(0,shown).map(s =>
+    h("button",{class:"card",onclick:()=>go("#/show/"+s.slug)}, posterEl(s), h("div",{class:"t"},s.name)));
+  const kids = [tabs, h("div",{class:"muted",style:"margin-bottom:10px"},list.length+" titles"),
+                h("div",{class:"grid"},cards)];
+  if (list.length > shown)
+    kids.push(h("button",{class:"more",onclick:()=>{shown+=60;home();}},"Aur dikhao"));
+  if (!list.length) kids.push(h("p",{class:"muted"},"Kuch nahi mila."));
+  $app.replaceChildren(...kids);
+}
+
+/* ---------- show detail ---------- */
+async function showPage(slug){
+  killPlayer();
+  const s = SHOWS.find(x => x.slug === slug);
+  if (!s){ go("#/"); return; }
+  $app.replaceChildren(h("p",{class:"muted"},"Loading..."));
+  let vids = [];
+  try {
+    const m = await jget("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(slug)+".json");
+    vids = (m.meta && m.meta.videos) || [];
+  } catch(e){}
+  const last = store.get("last:"+slug);
+  const kids = [h("button",{class:"back",onclick:()=>go("#/")},"← Back"),
+    h("div",{class:"detail"}, posterEl(s),
+      h("div",{}, h("h1",{},s.name),
+        h("div",{class:"muted"},s.movie?"Movie":(vids.length+" episodes")),
+        s.movie ? h("p",{},h("button",{class:"primary",onclick:()=>go("#/watch/"+slug)},"▶ Play")) : null))];
+  if (!s.movie){
+    const seasons = {};
+    vids.forEach(v => (seasons[v.season] = seasons[v.season] || []).push(v));
+    if (last) kids.push(h("p",{},h("button",{class:"primary",onclick:()=>go("#/watch/"+slug+"/"+last.replace(":","/"))},
+      "▶ Continue S"+last.split(":")[0]+" E"+last.split(":")[1])));
+    for (const sn of Object.keys(seasons).sort((a,b)=>a-b)){
+      kids.push(h("div",{class:"season"},"Season "+sn));
+      kids.push(h("div",{class:"eps"}, seasons[sn].map(v =>
+        h("button",{class:"ep",title:v.title||"",onclick:()=>go("#/watch/"+slug+"/"+v.season+"/"+v.episode)},String(v.episode)))));
+    }
+    if (!vids.length) kids.push(h("p",{class:"muted"},"Episodes nahi mile."));
+  }
+  $app.replaceChildren(...kids);
+}
+
+/* ---------- watch ---------- */
+async function watchPage(slug, season, episode){
+  killPlayer();
+  const s = SHOWS.find(x => x.slug === slug);
+  if (!s){ go("#/"); return; }
+  const label = s.movie ? s.name : s.name+" · S"+season+" E"+episode;
+  const video = h("video",{controls:true,playsinline:true,autoplay:true});
+  const msg = h("div",{class:"msg"},"Stream dhoondh raha hoon... (10-20 sec lag sakte hain)");
+  const chips = h("div",{class:"chips"});
+  const nav = h("div",{class:"row"});
+  $app.replaceChildren(
+    h("button",{class:"back",onclick:()=>go("#/show/"+slug)},"← "+s.name),
+    h("h2",{style:"margin:0 0 10px;font-size:18px"},label),
+    h("div",{class:"player"},video,msg), chips, nav,
+    h("div",{class:"note"},"Video atke toh doosri language/quality chip try karo. Phone pe pehli baar slow ho sakta hai."));
+
+  if (!s.movie){
+    const ep = +episode;
+    nav.append(
+      ep>1 ? h("button",{class:"chip",onclick:()=>go("#/watch/"+slug+"/"+season+"/"+(ep-1))},"‹ Prev") : "",
+      h("button",{class:"chip",onclick:()=>go("#/watch/"+slug+"/"+season+"/"+(ep+1))},"Next ›"));
+    store.set("last:"+slug, season+":"+episode);
+  }
+  let data;
+  try {
+    data = await jget("/api/watch/"+slug+(s.movie?"":"/"+season+"/"+episode));
+  } catch(e){ msg.textContent = "Server error. Thodi der baad try karo."; return; }
+  const src = data.sources || [];
+  if (!src.length){ msg.textContent = "Is episode ka koi chalne wala stream nahi mila."; return; }
+
+  const pref = store.get("lang");
+  let cur = src.findIndex(x => x.lang === pref && x.kind==="mq");
+  if (cur < 0) cur = src.findIndex(x => x.kind==="mq");
+  if (cur < 0) cur = 0;
+
+  function play(i){
+    cur = i; msg.style.display = "flex"; msg.textContent = "Loading...";
+    killPlayer();
+    const x = src[i]; store.set("lang", x.lang);
+    chips.replaceChildren(...src.map((y,j) => h("button",{class:"chip","aria-pressed":String(j===i),onclick:()=>play(j)},
+      y.lang + (y.quality?" "+y.quality:"") + (y.kind==="direct"?" (MKV)":""))));
+    const ok = () => { msg.style.display = "none"; };
+    const bad = (t) => { msg.style.display = "flex"; msg.textContent = t || "Ye stream nahi chala. Doosra chip try karo."; };
+    video.onplaying = ok; video.onerror = () => bad();
+    if (x.kind === "mq" && window.Hls && Hls.isSupported()){
+      hls = new Hls({maxBufferLength:30});
+      hls.loadSource(x.url); hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(()=>{}));
+      hls.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal) bad(); });
+    } else {
+      video.src = x.url;             // Safari/iOS native HLS, or direct file
+      video.play().catch(()=>{});
+    }
+  }
+  play(cur);
+}
+
+/* ---------- router ---------- */
+async function route(){
+  try {
+    await loadShows();
+    const p = location.hash.replace(/^#\/?/,"").split("/").filter(Boolean).map(decodeURIComponent);
+    window.scrollTo(0,0);
+    if (p[0]==="show" && p[1]) return showPage(p[1]);
+    if (p[0]==="watch" && p[1]) return watchPage(p[1], p[2], p[3]);
+    home();
+  } catch(e){
+    $app.replaceChildren(h("p",{class:"muted"},"Load nahi hua. Page refresh karo."));
+  }
+}
+window.addEventListener("hashchange", route);
+document.getElementById("logo").addEventListener("click", () => { $q.value=""; go("#/"); route(); });
+let qt; $q.addEventListener("input", () => { clearTimeout(qt); qt = setTimeout(() => {
+  shown = 60; if (location.hash && location.hash !== "#/") go("#/"); else if (SHOWS) home(); }, 200); });
+route();
+</script>
+</body>
+</html>

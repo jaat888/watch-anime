@@ -7,7 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # addon + uska data
-COPY addon.py episodes_index.jsonl posters.json ./
+COPY addon.py index.html episodes_index.jsonl posters.json ./
 
 # hosting platform PORT env deta hai; na de to 7700 chalega
 ENV PORT=7700 \
