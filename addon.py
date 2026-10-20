@@ -1447,13 +1447,49 @@ def _show_langs(rec):
     return sorted(found)
 
 
+# Western / non-anime cartoons.  The index has no genre field, so titles are
+# matched by name.  To add more without editing code, set CARTOON_EXTRA to a
+# comma-separated list of words (e.g. "gumball,oggy").
+_CARTOON_WORDS = (
+    "scooby", "tom and jerry", "ben 10", "ben gen 10", "tale dark", "grimm variations",
+    "101 dalmatian", "happy family usa", "7 bears", "alvinnn", "aladdin", "batman",
+    "batwheels", "bat-fam", "bionic max", "beywarriors", "beywheelz", "boonie bears",
+    "boboiboy", "centaurworld", "castlevania", "dr. seuss", "duck dodgers",
+    "ed, edd n eddy", "ejen ali", "exploding kittens", "hazbin", "helluva",
+    "hot wheels", "invincible season", "jentry chau", "jurassic world", "justice league",
+    "ninjago", "monsterwheelies", "miraculous", "moka", "murder drones", "nate is late",
+    "popeye", "powerpuff", "regular show", "richie rich", "rocket monkeys",
+    "sausage party", "spidey", "spirit rangers", "star wars", "swat kats", "tangled",
+    "teen titans", "thundercats", "teenage mutant", "tmnt", "tomb raider: the legend",
+    "transformers", "ultra b", "vampirina", "wolf king", "young justice",
+    "sabrina", "dragon tales", "denver, the last", "dennis the menace", "daffy",
+    "dragon prince", "ridley jones", "ronja", "mighty nein", "keymon",
+    "digital circus", "molly mcgee", "the bad guys", "diabolical", "agent elvis",
+    "are you afraid", "splinter cell", "twilight of the gods", "the mask", "cory carson",
+    "slugterra", "barbie", "hawa hawai", "avatar the", "avatar aang", "looney",
+    "bugs bunny", "tweety", "garfield", "smurfs", "paw patrol", "lego", "spongebob",
+    "mickey", "winnie", "lilo", "frozen", "mighty morphin", "power rangers",
+    "kamen rider", "iron man (2010)", "blade (2011)", "scott pilgrim", "arthur",
+    "bob the builder", "peppa", "oggy", "mr bean", "gumball", "johnny test",
+    "kids next door", "codename", "pixi post", "peabody", "turning mecard",
+    "mecard", "ladybug", "the loud house",
+)
+_CARTOON_EXTRA = tuple(w.strip().lower() for w in
+                       os.environ.get("CARTOON_EXTRA", "").split(",") if w.strip())
+
+
+def _kind(name):
+    n = (name or "").lower()
+    return "cartoon" if any(w in n for w in _CARTOON_WORDS + _CARTOON_EXTRA) else "anime"
+
+
 def api_shows():
     """Compact list for the website grid (name, slug, poster, movie?)."""
     with STORE_LOCK:
         items = [{"slug": r["slug"], "name": r["name"],
                   "poster": r.get("poster") or "", "movie": bool(r["movie"]),
-                  "langs": _show_langs(r)}
-                 for r in SHOWS.values()]
+                  "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i}
+                 for i, r in enumerate(SHOWS.values())]
     upd = _updates()
     for it in items:
         it["upd"] = int(upd.get(it["slug"], 0))
@@ -1623,7 +1659,7 @@ def _pump(handler, response, length=None, skip=0):
     origin slipping in an HTML page instead of media."""
     first = True
     written = 0
-    for chunk in response.iter_content(256 * 1024):
+    for chunk in response.iter_content(64 * 1024):
         if not chunk:
             continue
         if first:
@@ -1735,7 +1771,7 @@ def _serve_m3u8_child(handler, zipper, b64url, ext, rt=""):
             handler.send_header("Access-Control-Expose-Headers",
                                 "Content-Length, Content-Range, "
                                 "Accept-Ranges")
-            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Cache-Control", "private, max-age=3600")
             handler.send_header("Connection", "close")
             handler.end_headers()
 
@@ -1773,7 +1809,7 @@ def _serve_m3u8_child(handler, zipper, b64url, ext, rt=""):
             handler.send_header("Access-Control-Allow-Origin", "*")
             handler.send_header("Access-Control-Expose-Headers",
                                 "Content-Length, Accept-Ranges")
-            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Cache-Control", "private, max-age=3600")
             handler.send_header("Connection", "close")
             handler.end_headers()
             if not handler._is_head:

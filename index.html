@@ -60,6 +60,7 @@ h2.sec{font-size:17px;margin:24px 0 12px;display:flex;justify-content:space-betw
 .player{background:#000;border-radius:16px;overflow:hidden;aspect-ratio:16/9;position:relative;box-shadow:0 10px 40px rgba(0,0,0,.25)}
 video{width:100%;height:100%;display:block}
 .msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px;color:#fff;background:rgba(0,0,0,.7)}
+.buf{position:absolute;top:10px;left:10px;background:rgba(0,0,0,.65);color:#fff;font-size:12px;padding:4px 10px;border-radius:999px;display:none;pointer-events:none}.epbox{margin-top:8px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:14px;display:grid;gap:12px}
 .lbl{font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--dim);margin-bottom:6px}
 .chips{display:flex;flex-wrap:wrap;gap:8px}.chip{border:1px solid var(--line);background:var(--panel2);border-radius:999px;padding:6px 14px}.chip[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#fff}
@@ -92,7 +93,8 @@ async function api(url,body){const o={headers:{}},t=store.get("token");if(t)o.he
   if(body){o.method="POST";o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body)}
   const r=await fetch(url,o);let j={};try{j=await r.json()}catch(e){}if(!r.ok){const e=new Error(j.error||r.status);e.status=r.status;throw e}return j}
 const go=x=>{location.hash=x};
-function killPlayer(){clearInterval(saveTimer);clearInterval(heroTimer);clearInterval(nextTimer);if(hls){hls.destroy();hls=null}}
+let WTOK=0,curVideo=null;
+function killPlayer(){WTOK++;clearInterval(saveTimer);clearInterval(heroTimer);clearInterval(nextTimer);if(hls){hls.destroy();hls=null}if(curVideo){try{curVideo.pause();curVideo.removeAttribute("src");curVideo.load()}catch(e){}curVideo=null}}
 function setTheme(t){document.documentElement.dataset.theme=t;store.set("theme",t);const m=document.querySelector('meta[name="theme-color"]');if(m)m.content=t==="dark"?"#0b0d13":"#f4f3ef"}
 setTheme(store.get("theme")||(matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light"));
 document.getElementById("theme").onclick=()=>setTheme(document.documentElement.dataset.theme==="dark"?"light":"dark");
@@ -150,26 +152,29 @@ function heroEl(items){
       h("div",{class:"row2"},h("button",{class:"pri",onclick:()=>go(p?resumeLink(s,p).slice(1):"#/show/"+s.slug)},p?"▶ Resume"+(s.movie?"":" S"+p.season+" E"+p.episode):"▶ Watch now"),h("button",{class:"glass",onclick:()=>go("#/show/"+s.slug)},"Details"))),
     items.length>1?h("div",{class:"dots"},items.map((_,k)=>h("i",{class:k===i?"on":""}))):null)}
   draw();if(items.length>1)heroTimer=setInterval(()=>{i=(i+1)%items.length;draw()},6000);return box}
+const A=s=>s.kind!=="cartoon";
 function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=term||filter!=="all"||lang!=="all";
   const langs=[...new Set(SHOWS.flatMap(s=>s.langs||[]))].sort();
-  const list=SHOWS.filter(s=>(filter==="all"||(filter==="movie")===s.movie)&&(lang==="all"||(s.langs||[]).includes(lang))&&(!term||s.name.toLowerCase().includes(term)));
+  const list=SHOWS.filter(s=>(filter==="all"||(filter==="movie"?s.movie:filter==="cartoon"?(!s.movie&&!A(s)):(!s.movie&&A(s))))&&(lang==="all"||(s.langs||[]).includes(lang))&&(!term||s.name.toLowerCase().includes(term)));
   const cont=PROG.map(p=>({p,s:bySlug(p.slug)})).filter(x=>x.s);
-  const fresh=SHOWS.filter(isNew).sort((a,b)=>b.upd-a.upd);
+  const fresh=SHOWS.filter(s=>isNew(s)&&A(s)).sort((a,b)=>b.upd-a.upd);
+  const recent=SHOWS.filter(s=>!s.movie&&A(s)&&s.poster&&!fresh.includes(s)).sort((a,b)=>b.ord-a.ord);
+  const latest=[...fresh,...recent].slice(0,20);
   const kids=[];
   if(!browsing){
-    const heroItems=[...cont.slice(0,1),...fresh.slice(0,4).map(s=>({s}))];
-    if(!heroItems.length)heroItems.push(...SHOWS.filter(s=>s.poster&&!s.movie).sort((a,b)=>(a.name.length%7)-(b.name.length%7)).slice(0,4).map(s=>({s})));
+    const heroItems=[...cont.slice(0,1),...latest.filter(s=>s.poster).slice(0,4).map(s=>({s}))];
     if(heroItems.length)kids.push(heroEl(heroItems));
     if(ME)kids.push(...rail("Continue watching",cont.slice(0,15),null,({p,s})=>card(s,p.dur?Math.min(100,p.pos/p.dur*100):0,()=>go(resumeLink(s,p).slice(1)))));
     if(ME)kids.push(...rail("My List",FAVS.map(bySlug).filter(Boolean).slice(0,20),()=>go("#/list")));
-    kids.push(...rail("Latest updates",fresh.slice(0,20)));
+    kids.push(...rail(fresh.length?"Latest episodes":"Recently added",latest));
     const pop=POP.map(bySlug).filter(Boolean);if(pop.length>=4)kids.push(...rail("Popular on mollad_jaat",pop));
-    for(const L of ["Hindi","Tamil","Telugu"]){const l=SHOWS.filter(s=>(s.langs||[]).includes(L)&&!s.movie&&s.poster).sort((a,b)=>b.upd-a.upd||a.name.localeCompare(b.name)).slice(0,20);
-      kids.push(...rail(L+" anime",l,()=>{lang=L;filter="all";shown=60;home()}))}
+    for(const L of ["Hindi","Tamil","Telugu"]){const l=SHOWS.filter(s=>(s.langs||[]).includes(L)&&!s.movie&&A(s)&&s.poster).sort((a,b)=>b.upd-a.upd||a.name.localeCompare(b.name)).slice(0,20);
+      kids.push(...rail(L+" anime",l,()=>{lang=L;filter="anime";shown=60;home()}))}
+    kids.push(...rail("Cartoons",SHOWS.filter(s=>!s.movie&&!A(s)&&s.poster).sort((a,b)=>b.ord-a.ord).slice(0,20),()=>{filter="cartoon";lang="all";shown=60;home()}));
     kids.push(...rail("Movies",SHOWS.filter(s=>s.movie&&s.poster).slice(0,20),()=>{filter="movie";lang="all";shown=60;home()}))}
   const sel=h("select",{onchange:e=>{lang=e.target.value;shown=60;home()}},h("option",{value:"all"},"All languages"),langs.map(l=>h("option",{value:l,selected:l===lang},l)));
   kids.push(h("h2",{class:"sec"},browsing?"Results":"Browse all",h("span",{class:"muted",style:"font-weight:400;font-size:13px"},list.length+" titles")),
-    h("div",{class:"filters"},[["all","All"],["series","Series"],["movie","Movies"]].map(([k,l])=>h("button",{class:"tab","aria-pressed":String(filter===k),onclick:()=>{filter=k;shown=60;home()}},l)),sel),
+    h("div",{class:"filters"},[["all","All"],["anime","Anime"],["cartoon","Cartoons"],["movie","Movies"]].map(([k,l])=>h("button",{class:"tab","aria-pressed":String(filter===k),onclick:()=>{filter=k;shown=60;home()}},l)),sel),
     h("div",{class:"grid"},list.slice(0,shown).map(s=>card(s))));
   if(list.length>shown)kids.push(h("p",{style:"text-align:center"},h("button",{class:"btn",onclick:()=>{shown+=60;home()}},"Show more")));
   if(!list.length)kids.push(h("p",{class:"muted"},"No results found."));
@@ -212,23 +217,36 @@ async function downloadLevel(uri,name,bar,label){
   document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000)}
 
 /* ---------- watch ---------- */
-async function watchPage(slug,season,episode){killPlayer();const s=bySlug(slug);if(!s)return go("#/");
-  const video=h("video",{controls:true,playsinline:true,autoplay:true});
-  const msg=h("div",{class:"msg"},"Finding the best stream… this can take 10–20 seconds."),langBox=h("div",{class:"chips"}),sels=h("div",{class:"sels"}),nav=h("div",{class:"chips"}),box=h("div",{class:"player"},video,msg);
+async function watchPage(slug,season,episode){killPlayer();const tok=WTOK,alive=()=>tok===WTOK;const s=bySlug(slug);if(!s)return go("#/");
+  const video=h("video",{controls:true,playsinline:true,autoplay:true,preload:"auto"});curVideo=video;
+  const buf=h("div",{class:"buf"},"Buffering…"),epBox=h("div",{class:"epbox"});
+  const msg=h("div",{class:"msg"},"Finding the best stream… this can take 10–20 seconds."),langBox=h("div",{class:"chips"}),sels=h("div",{class:"sels"}),nav=h("div",{class:"chips"}),box=h("div",{class:"player"},video,buf,msg);
   const dlBar=h("i"),dlLabel=h("div",{class:"sub"},""),dlBtn=h("button",{class:"btn"},"⬇ Download this episode");
   const auto=h("input",{type:"checkbox",checked:store.get("auto")!=="0",onchange:e=>store.set("auto",e.target.checked?"1":"0")});
   const title=s.movie?s.name:s.name+" · S"+season+" E"+episode;
   $app.replaceChildren(h("button",{class:"back",onclick:()=>go("#/show/"+slug)},"← "+s.name),h("h2",{style:"margin:0 0 12px;font-size:19px"},title),box,
-    h("div",{class:"panel"},h("div",{},h("div",{class:"lbl"},"Language"),langBox),sels,h("label",{class:"chk"},auto,"Play next episode automatically"),h("div",{},dlBtn,h("div",{class:"dl",style:"margin-top:10px"},dlBar),dlLabel)),nav);
+    h("div",{class:"panel"},h("div",{},h("div",{class:"lbl"},"Language"),langBox),sels,h("label",{class:"chk"},auto,"Play next episode automatically"),h("div",{},dlBtn,h("div",{class:"dl",style:"margin-top:10px"},dlBar),dlLabel)),nav,epBox);
   let nextEp=null;
+  function drawEps(vids){
+    if(!vids.length)return;
+    const seasons=[...new Set(vids.map(v=>+v.season))].sort((a,b)=>a-b);let shownSeason=+season;
+    if(!seasons.includes(shownSeason))shownSeason=seasons[0];
+    const tabs=h("div",{class:"chips"}),grid=h("div",{class:"eps"});
+    function paint(){
+      tabs.replaceChildren(...(seasons.length>1?seasons.map(n=>h("button",{class:"chip","aria-pressed":String(n===shownSeason),onclick:()=>{shownSeason=n;paint()}},"Season "+n)):[]));
+      grid.replaceChildren(...vids.filter(v=>+v.season===shownSeason).sort((a,b)=>a.episode-b.episode).map(v=>h("button",{"data-k":v.season+":"+v.episode,class:"ep"+(+v.season===+season&&+v.episode===+episode?" cur":""),title:v.title||"",onclick:()=>go("#/watch/"+slug+"/"+v.season+"/"+v.episode)},String(v.episode))));
+      if(ME)api("/api/seen/"+slug).then(r=>{if(!alive())return;r.seen.forEach(k=>{const b=grid.querySelector('[data-k="'+k+'"]');if(b)b.classList.add("seen")})}).catch(()=>{});
+      const c=grid.querySelector(".cur");if(c)c.scrollIntoView({block:"nearest"})}
+    epBox.replaceChildren(h("h2",{class:"sec"},"Episodes"),tabs,grid);paint()}
   if(!s.movie){const e=+episode;nav.append(e>1?h("button",{class:"chip",onclick:()=>go("#/watch/"+slug+"/"+season+"/"+(e-1))},"‹ Previous"):"");
-    getVids(s).then(vids=>{const sn=+season,list=vids.filter(v=>+v.season===sn).map(v=>+v.episode).sort((a,b)=>a-b);
+    getVids(s).then(vids=>{if(!alive())return;drawEps(vids);const sn=+season,list=vids.filter(v=>+v.season===sn).map(v=>+v.episode).sort((a,b)=>a-b);
       const nx=list.find(x=>x>e);if(nx)nextEp=[sn,nx];else{const ns=[...new Set(vids.map(v=>+v.season))].sort((a,b)=>a-b).find(x=>x>sn);if(ns)nextEp=[ns,Math.min(...vids.filter(v=>+v.season===ns).map(v=>+v.episode))]}
       if(nextEp)nav.append(h("button",{class:"chip",onclick:()=>go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1])},"Next ›"))})}
-  let data;try{data=await api("/api/watch/"+slug+(s.movie?"":"/"+season+"/"+episode))}catch(e){msg.textContent="Server error. Please try again shortly.";return}
+  let data;try{data=await api("/api/watch/"+slug+(s.movie?"":"/"+season+"/"+episode))}catch(e){if(alive())msg.textContent="Server error. Please try again shortly.";return}
+  if(!alive())return;
   const src=data.sources||[];if(!src.length){msg.textContent="No playable stream is available for this title yet.";return}
   const pref=store.get("lang");let cur=src.findIndex(x=>x.lang===pref&&x.kind==="mq");if(cur<0)cur=src.findIndex(x=>x.kind==="mq");if(cur<0)cur=0;
-  await meReady;
+  await meReady;if(!alive())return;
   const saved=PROG.find(p=>p.slug===slug&&(s.movie||(p.season==season&&p.episode==episode)));let resume=saved&&saved.pos>10&&saved.dur-saved.pos>30?saved.pos:0,qSel=-1;
   function save(ended){if(!ME||!video.duration)return;const r={slug,season:+season||0,episode:+episode||0,pos:ended?video.duration:video.currentTime,dur:video.duration};
     api("/api/progress",r).then(()=>{const i=PROG.findIndex(p=>p.slug===slug);if(i>=0)PROG.splice(i,1);PROG.unshift(r)}).catch(()=>{})}
@@ -247,15 +265,25 @@ async function watchPage(slug,season,episode){killPlayer();const s=bySlug(slug);
     const x=src[i];store.set("lang",x.lang);
     langBox.replaceChildren(...src.map((y,j)=>h("button",{class:"chip","aria-pressed":String(j===i),onclick:()=>play(j)},y.lang+(y.quality?" "+y.quality:""))));
     const bad=t=>{msg.style.display="flex";msg.textContent=t||"This stream failed to load. Try another language."};
-    video.onplaying=()=>{msg.style.display="none"};video.onerror=()=>bad();video.onloadedmetadata=()=>{if(resume){video.currentTime=resume;resume=0}};
+    const hideMsg=()=>{msg.style.display="none";buf.style.display="none"};let stallT=0;
+    video.onplaying=hideMsg;video.onloadeddata=hideMsg;video.oncanplay=hideMsg;
+    video.onwaiting=()=>{if(msg.style.display!=="flex")buf.style.display="block";clearTimeout(stallT);stallT=setTimeout(()=>{if(hls&&video.readyState<3)hls.startLoad(video.currentTime||-1)},12000)};
+    video.onseeked=()=>{if(video.readyState>=3)buf.style.display="none"};
+    video.onerror=()=>{if(!hls)bad()};video.onloadedmetadata=()=>{if(resume){video.currentTime=resume;resume=0}};
     saveTimer=setInterval(()=>{if(!video.paused)save()},10000);video.onpause=()=>{if(!video.ended)save()};
-    if(x.kind==="mq"&&window.Hls&&Hls.isSupported()){hls=new Hls({maxBufferLength:30});hls.loadSource(x.url);hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED,()=>{video.play().catch(()=>{});
+    if(x.kind==="mq"&&window.Hls&&Hls.isSupported()){const pol=(n,d)=>({default:{maxTimeToFirstByteMs:20000,maxLoadTimeMs:60000,timeoutRetry:{maxNumRetry:n,retryDelayMs:0,maxRetryDelayMs:0},errorRetry:{maxNumRetry:n+2,retryDelayMs:d,maxRetryDelayMs:8000}}});
+      hls=new Hls({maxBufferLength:60,maxMaxBufferLength:120,backBufferLength:40,capLevelToPlayerSize:true,startFragPrefetch:true,manifestLoadPolicy:pol(3,1000),levelLoadPolicy:pol(3,1000),fragLoadPolicy:pol(4,1000)});
+      let netTry=0,medTry=0;hls.loadSource(x.url);hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>{video.play().catch(()=>{hideMsg()});
         if(hls.levels.length>1)sels.prepend(h("select",{onchange:e=>{qSel=+e.target.value;hls.currentLevel=qSel}},h("option",{value:-1},"Quality: Auto"),hls.levels.map((l,k)=>({l,k})).sort((a,b)=>b.l.height-a.l.height).map(({l,k})=>h("option",{value:k},"Quality: "+l.height+"p"))))});
       hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED,()=>{if(hls.subtitleTracks.length)sels.append(h("select",{onchange:e=>{hls.subtitleTrack=+e.target.value}},h("option",{value:-1},"Subtitles: Off"),hls.subtitleTracks.map((t,k)=>h("option",{value:k},"Subtitles: "+(t.name||t.lang||k+1)))))});
       hls.on(Hls.Events.AUDIO_TRACKS_UPDATED,()=>{if(hls.audioTracks.length>1)sels.append(h("select",{onchange:e=>{hls.audioTrack=+e.target.value}},hls.audioTracks.map((t,k)=>h("option",{value:k},"Audio: "+(t.name||t.lang||k+1)))))});
-      hls.on(Hls.Events.ERROR,(_e,d)=>{if(d.fatal)bad()})}
-    else{video.src=x.url;video.play().catch(()=>{})}}
+      hls.on(Hls.Events.FRAG_BUFFERED,()=>{netTry=0});
+      hls.on(Hls.Events.ERROR,(_e,d)=>{if(!d.fatal)return;
+        if(d.type===Hls.ErrorTypes.NETWORK_ERROR&&netTry++<4){buf.style.display="block";setTimeout(()=>{if(hls)hls.startLoad(video.currentTime||-1)},1500*netTry)}
+        else if(d.type===Hls.ErrorTypes.MEDIA_ERROR&&medTry++<3){if(medTry===2)hls.swapAudioCodec();hls.recoverMediaError()}
+        else bad(src.length>1?"This stream failed to load. Try another language above.":"This stream failed to load. Please try again in a moment.")})}
+    else{video.src=x.url;video.play().catch(()=>{hideMsg()})}}
   play(cur)}
 
 async function route(){try{await loadShows();const p=location.hash.replace(/^#\/?/,"").split("/").filter(Boolean).map(decodeURIComponent);scrollTo(0,0);drawNav();
