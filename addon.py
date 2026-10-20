@@ -81,7 +81,7 @@ WN_TTL          = _env_int("WN_TTL", 6 * 3600)     # WN signed link (~8h life)
 WN_STALE        = _env_int("WN_STALE", 6 * 3600)   # max stale-serve age, WN
 CINE_TTL        = _env_int("CINE_TTL", 6 * 3600)   # Cinemeta title cache
 
-VERSION  = "3.4.2"
+VERSION  = "3.4.5"
 ADDON_ID = "community.raretoons2"
 ADDON_NAME = "mollad_jaat"
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -1483,12 +1483,21 @@ def _kind(name):
     return "cartoon" if any(w in n for w in _CARTOON_WORDS + _CARTOON_EXTRA) else "anime"
 
 
+def _latest_ep(rec):
+    """(season, episode) of the newest episode, or None for movies."""
+    if rec["movie"]:
+        return None
+    ks = [k for k in rec["eps"] if k[0]]
+    return list(max(ks)) if ks else None
+
+
 def api_shows():
     """Compact list for the website grid (name, slug, poster, movie?)."""
     with STORE_LOCK:
         items = [{"slug": r["slug"], "name": r["name"],
                   "poster": r.get("poster") or "", "movie": bool(r["movie"]),
-                  "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i}
+                  "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i,
+                  "le": _latest_ep(r)}
                  for i, r in enumerate(SHOWS.values())]
     upd = _updates()
     for it in items:
@@ -1734,6 +1743,7 @@ def _serve_m3u8_child(handler, zipper, b64url, ext, rt=""):
         if mr:
             forced = f"bytes={mr.group(1)}-{mr.group(2)}"
             rng = forced                # the segment IS this byte slice
+    up = None
     try:
         # Variant/media playlists must be REWRITTEN too; media streams.
         if ext == ".m3u8":
@@ -1826,7 +1836,109 @@ def _serve_m3u8_child(handler, zipper, b64url, ext, rt=""):
             handler._send({"error": f"child: {exc}"}, 502)
         except Exception:
             pass
+    finally:
+        # seeking aborts in-flight segments: always release the upstream
+        # connection, or stale ones pile up and the player starts to stall
+        if up is not None:
+            try:
+                up.close()
+            except Exception:
+                pass
 
+
+
+def _serve_download(handler, zipper, b64url, name, check=False):
+    """Straight-to-disk download: the server joins the playlist's segments
+    into ONE file and streams it with Content-Disposition: attachment, so
+    the browser's own download manager saves it (nothing is held in RAM)."""
+    target = _u64d(b64url)
+    if not target.startswith("http"):
+        handler._send({"error": "bad link"}, 400)
+        return
+    try:
+        r = upstream_get(target, referer=ARGON, timeout=20)
+        if r.status_code != 200:
+            handler._send({"error": f"playlist {r.status_code}"}, 502)
+            return
+        text = r.text or ""
+        if re.search(r"#EXT-X-KEY:METHOD=(?!NONE)", text):
+            handler._send({"error": "This stream is encrypted and cannot be downloaded."}, 400)
+            return
+        items, init, br, last_end = [], None, None, 0
+        for line in text.splitlines():
+            ls = line.strip()
+            if not ls:
+                continue
+            if ls.startswith("#EXT-X-MAP"):
+                mm = _URL_ATTR_RE.search(ls)
+                if mm:
+                    init = urljoin(target, mm.group(1))
+            elif ls.startswith("#EXT-X-BYTERANGE"):
+                mb = re.match(r"#EXT-X-BYTERANGE:(\d+)(?:@(\d+))?", ls)
+                if mb:
+                    ln = int(mb.group(1))
+                    st = int(mb.group(2)) if mb.group(2) is not None else last_end
+                    br = (st, st + ln - 1)
+                    last_end = st + ln
+            elif not ls.startswith("#"):
+                items.append((urljoin(target, ls), br))
+                br = None
+        if init:
+            items.insert(0, (init, None))
+        if not items:
+            handler._send({"error": "Nothing to download."}, 400)
+            return
+        if check:
+            handler._send({"ok": True, "parts": len(items)})
+            return
+        ext = ".mp4" if init else ".ts"
+        safe = re.sub(r"[^\w\- ]+", "", name or "video").strip().replace(" ", "_")[:80] or "video"
+        handler.send_response(200)
+        handler.send_header("Content-Type", "video/mp4" if init else "video/mp2t")
+        handler.send_header("Content-Disposition", f'attachment; filename="{safe}{ext}"')
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+        handler.close_connection = True
+        if handler._is_head:
+            return
+        for url, rngt in items:
+            ok = False
+            for attempt in range(3):
+                up = None
+                try:
+                    rng = f"bytes={rngt[0]}-{rngt[1]}" if rngt else None
+                    up = upstream_stream(url, referer=ARGON, rng=rng, timeout=30)
+                    if up.status_code not in (200, 206):
+                        raise RuntimeError(f"seg {up.status_code}")
+                    length = skip = None
+                    if rngt:
+                        length = rngt[1] - rngt[0] + 1
+                        skip = rngt[0] if up.status_code == 200 else 0
+                    # nothing is written before _pump's first-chunk check,
+                    # so a failed attempt can be retried cleanly
+                    if _pump(handler, up, length=length, skip=skip or 0):
+                        ok = True
+                        break
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                except Exception:
+                    time.sleep(0.5 * (attempt + 1))
+                finally:
+                    if up is not None:
+                        try:
+                            up.close()
+                        except Exception:
+                            pass
+            if not ok:
+                return                      # abort: the browser shows a failed download
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    except Exception as exc:
+        try:
+            handler._send({"error": f"download: {exc}"}, 502)
+        except Exception:
+            pass
 
 
 _wn_size_cache = {}                        # target -> (expires, size)
@@ -2182,6 +2294,17 @@ class Handler(BaseHTTPRequestHandler):
                     self._send({"error": "bad token"}, 400)
                     return
                 _serve_m3u8_master(self, zipper)
+                return
+
+            m = re.match(rf"^/mq/({_B64_RE}+)/dl/({_B64_RE}+)(\.[A-Za-z0-9]{{1,5}})?$", path)
+            if m:
+                zipper = _mq_decode_token(m.group(1))
+                if not zipper.startswith("https://codedew.com/"):
+                    self._send({"error": "bad token"}, 400)
+                    return
+                _serve_download(self, zipper, m.group(2),
+                                (qs.get("name", [""])[0] if qs else ""),
+                                check=bool(qs and qs.get("check")))
                 return
 
             m = re.match(rf"^/mq/({_B64_RE}+)/u/({_B64_RE}+)"

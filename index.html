@@ -32,18 +32,20 @@ main{max-width:1180px;margin:0 auto;padding:16px 16px 8px;min-height:70vh}
 .countdown div{display:flex;gap:8px}.countdown button{background:rgba(255,255,255,.18);border:0;color:#fff;border-radius:10px;padding:7px 12px}.countdown .go{background:var(--accent)}
 .chk{display:flex;gap:10px;align-items:center}
 .sub{font-size:12px;color:var(--dim)}
-.hero{position:relative;border-radius:18px;overflow:hidden;min-height:210px;display:flex;align-items:flex-end;margin-bottom:8px;background:var(--panel2)}
+.hero{position:relative;border-radius:16px;overflow:hidden;min-height:150px;display:flex;align-items:center;margin-bottom:8px;background:var(--panel2)}
 .hero .bg{position:absolute;inset:0;background-size:cover;background-position:center 25%;filter:blur(2px) brightness(.55);transform:scale(1.08)}
-.hero .in2{position:relative;padding:20px;color:#fff;max-width:640px}.hero h1{margin:6px 0 4px;font-size:24px;line-height:1.15}
+.hero .hin{position:relative;display:flex;gap:14px;align-items:center;padding:14px 16px 26px;color:#fff;width:100%}.hero .hp{flex:0 0 88px}.hero .hp .poster,.hero .hp .ph{border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.5)}
+.hero .in2{min-width:0;max-width:560px}.hero h1{margin:6px 0 4px;font-size:19px;line-height:1.15;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.hero .pri,.hero .glass{padding:8px 16px;font-size:14px}.ept{padding:0 10px 2px;font-size:11px;font-weight:700;color:var(--accent)}.ept span{color:var(--dim);font-weight:500}
 .tag{display:inline-block;background:rgba(255,255,255,.18);border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600}
 h2.sec{font-size:17px;margin:24px 0 12px;display:flex;justify-content:space-between;align-items:center}
-.rail{display:grid;grid-auto-flow:column;grid-auto-columns:132px;gap:14px;overflow-x:auto;padding-bottom:6px;scrollbar-width:none}.rail::-webkit-scrollbar{display:none}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:14px}
+.rail{display:grid;grid-auto-flow:column;grid-auto-columns:112px;gap:12px;overflow-x:auto;padding-bottom:6px;scrollbar-width:none}.rail::-webkit-scrollbar{display:none}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:12px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;padding:0;text-align:left;width:100%;position:relative;transition:transform .15s,border-color .15s}
 .card:hover{border-color:var(--accent);transform:translateY(-2px)}
 .poster,.ph{aspect-ratio:2/3;width:100%;display:block;object-fit:cover;background:var(--panel2)}
 .ph{display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:var(--accent)}
-.t{padding:8px 10px;font-size:13px;line-height:1.3;min-height:3.2em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.t{padding:6px 10px 8px;font-size:12px;line-height:1.3;min-height:2.6em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .badge{position:absolute;top:8px;left:8px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:11px;font-weight:800;border-radius:8px;padding:2px 8px}
 .prog{height:4px;background:var(--line)}.prog i{display:block;height:100%;background:var(--accent)}
 .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;position:sticky;top:57px;z-index:4;background:var(--bg);padding:8px 0}
@@ -94,7 +96,7 @@ async function api(url,body){const o={headers:{}},t=store.get("token");if(t)o.he
   const r=await fetch(url,o);let j={};try{j=await r.json()}catch(e){}if(!r.ok){const e=new Error(j.error||r.status);e.status=r.status;throw e}return j}
 const go=x=>{location.hash=x};
 let WTOK=0,curVideo=null;
-function killPlayer(){WTOK++;clearInterval(saveTimer);clearInterval(heroTimer);clearInterval(nextTimer);if(hls){hls.destroy();hls=null}if(curVideo){try{curVideo.pause();curVideo.removeAttribute("src");curVideo.load()}catch(e){}curVideo=null}}
+let wdT=0;function killPlayer(){WTOK++;clearInterval(wdT);clearInterval(saveTimer);clearInterval(heroTimer);clearInterval(nextTimer);if(hls){hls.destroy();hls=null}if(curVideo){try{curVideo.pause();curVideo.removeAttribute("src");curVideo.load()}catch(e){}curVideo=null}}
 function setTheme(t){document.documentElement.dataset.theme=t;store.set("theme",t);const m=document.querySelector('meta[name="theme-color"]');if(m)m.content=t==="dark"?"#0b0d13":"#f4f3ef"}
 setTheme(store.get("theme")||(matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light"));
 document.getElementById("theme").onclick=()=>setTheme(document.documentElement.dataset.theme==="dark"?"light":"dark");
@@ -139,6 +141,10 @@ async function getVids(s){if(META[s.slug])return META[s.slug];let v=[];try{const
 function posterEl(s){const f=()=>h("div",{class:"ph"},(s.name[0]||"?").toUpperCase());if(!s.poster)return f();
   const i=h("img",{class:"poster",loading:"lazy",alt:"",referrerpolicy:"no-referrer",src:s.poster});i.onerror=()=>i.replaceWith(f());return i}
 function card(s,pct,onclick){return h("button",{class:"card",onclick:onclick||(()=>go("#/show/"+s.slug))},posterEl(s),isNew(s)&&pct==null?h("div",{class:"badge"},"NEW"):null,pct!=null?h("div",{class:"prog"},h("i",{style:"width:"+pct+"%"})):null,h("div",{class:"t"},s.name))}
+const ago=t=>{const d=Math.max(0,NOW-t);return d<3600?Math.max(1,Math.round(d/60))+"m ago":d<86400?Math.round(d/3600)+"h ago":Math.round(d/86400)+"d ago"};
+const epLink=s=>s.le?"#/watch/"+s.slug+"/"+s.le[0]+"/"+s.le[1]:"#/show/"+s.slug;
+function epCard(s){const nw=isNew(s);return h("button",{class:"card",onclick:()=>go(epLink(s))},posterEl(s),nw?h("div",{class:"badge"},"NEW"):null,
+  s.le?h("div",{class:"ept",style:"margin-top:6px"},"S"+s.le[0]+" · E"+s.le[1],nw?h("span",{}," · "+ago(s.upd)):null):null,h("div",{class:"t",style:"min-height:2.6em"},s.name))}
 const resumeLink=(s,p)=>"#/watch/"+s.slug+(s.movie?"":"/"+p.season+"/"+p.episode);
 const bgStyle=s=>s.poster?"background-image:url('"+s.poster.replace(/'/g,"%27")+"')":"";
 async function toggleFav(slug){if(!ME)return authModal();const on=!FAVS.includes(slug);try{await api("/api/fav",{slug,on});FAVS=on?[slug,...FAVS]:FAVS.filter(x=>x!==slug)}catch(e){}}
@@ -147,9 +153,10 @@ async function toggleFav(slug){if(!ME)return authModal();const on=!FAVS.includes
 function rail(title,list,more,mk){return list.length?[h("h2",{class:"sec"},title,more?h("button",{class:"see",onclick:more},"See all ›"):null),h("div",{class:"rail"},list.map(mk||(s=>card(s))))]:[]}
 function heroEl(items){
   const box=h("div",{class:"hero"});let i=0;
-  function draw(){const {s,p}=items[i];box.replaceChildren(h("div",{class:"bg",style:bgStyle(s)}),
-    h("div",{class:"in2"},h("span",{class:"tag"},p?"Continue watching":isNew(s)?"New update":"Featured"),h("h1",{},s.name),
-      h("div",{class:"row2"},h("button",{class:"pri",onclick:()=>go(p?resumeLink(s,p).slice(1):"#/show/"+s.slug)},p?"▶ Resume"+(s.movie?"":" S"+p.season+" E"+p.episode):"▶ Watch now"),h("button",{class:"glass",onclick:()=>go("#/show/"+s.slug)},"Details"))),
+  function draw(){const {s,p}=items[i],nw=isNew(s);box.replaceChildren(h("div",{class:"bg",style:bgStyle(s)}),
+    h("div",{class:"hin"},h("div",{class:"hp"},posterEl(s)),
+    h("div",{class:"in2"},h("span",{class:"tag"},p?"Continue watching":nw&&s.le?"New episode · S"+s.le[0]+" E"+s.le[1]:"Featured"),h("h1",{},s.name),
+      h("div",{class:"row2",style:"margin-top:6px"},h("button",{class:"pri",onclick:()=>go(p?resumeLink(s,p).slice(1):nw?epLink(s).slice(1):"#/show/"+s.slug)},p?"▶ Resume"+(s.movie?"":" S"+p.season+" E"+p.episode):"▶ Watch now"),h("button",{class:"glass",onclick:()=>go("#/show/"+s.slug)},"Details")))),
     items.length>1?h("div",{class:"dots"},items.map((_,k)=>h("i",{class:k===i?"on":""}))):null)}
   draw();if(items.length>1)heroTimer=setInterval(()=>{i=(i+1)%items.length;draw()},6000);return box}
 const A=s=>s.kind!=="cartoon";
@@ -164,9 +171,10 @@ function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=t
   if(!browsing){
     const heroItems=[...cont.slice(0,1),...latest.filter(s=>s.poster).slice(0,4).map(s=>({s}))];
     if(heroItems.length)kids.push(heroEl(heroItems));
+    kids.push(...rail("Latest episodes",fresh.slice(0,20),null,epCard));
     if(ME)kids.push(...rail("Continue watching",cont.slice(0,15),null,({p,s})=>card(s,p.dur?Math.min(100,p.pos/p.dur*100):0,()=>go(resumeLink(s,p).slice(1)))));
     if(ME)kids.push(...rail("My List",FAVS.map(bySlug).filter(Boolean).slice(0,20),()=>go("#/list")));
-    kids.push(...rail(fresh.length?"Latest episodes":"Recently added",latest));
+    kids.push(...rail("Recently added",recent.slice(0,20),null,epCard));
     const pop=POP.map(bySlug).filter(Boolean);if(pop.length>=4)kids.push(...rail("Popular on mollad_jaat",pop));
     for(const L of ["Hindi","Tamil","Telugu"]){const l=SHOWS.filter(s=>(s.langs||[]).includes(L)&&!s.movie&&A(s)&&s.poster).sort((a,b)=>b.upd-a.upd||a.name.localeCompare(b.name)).slice(0,20);
       kids.push(...rail(L+" anime",l,()=>{lang=L;filter="anime";shown=60;home()}))}
@@ -205,16 +213,10 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
 
 /* ---------- download ---------- */
 async function downloadLevel(uri,name,bar,label){
-  const base=new URL(uri,location.href),txt=await(await fetch(uri)).text();
-  if(/#EXT-X-KEY:METHOD=(?!NONE)/.test(txt))throw new Error("This stream is encrypted and cannot be downloaded.");
-  const map=txt.match(/#EXT-X-MAP:URI="([^"]+)"/),segs=txt.split("\n").map(l=>l.trim()).filter(l=>l&&l[0]!=="#").map(l=>new URL(l,base).href);
-  if(!segs.length)throw new Error("Nothing to download.");
-  const urls=(map?[new URL(map[1],base).href]:[]).concat(segs),parts=new Array(urls.length);let done=0,next=0;
-  async function worker(){while(next<urls.length){const i=next++;for(let t=0;;t++){try{const r=await fetch(urls[i]);if(!r.ok)throw 0;parts[i]=await r.arrayBuffer();break}catch(e){if(t>=2)throw new Error("Download failed. Please try again.")}}
-    done++;bar.style.width=(done/urls.length*100)+"%";label.textContent="Downloading… "+Math.round(done/urls.length*100)+"%"}}
-  await Promise.all([worker(),worker(),worker(),worker()]);
-  const blob=new Blob(parts,{type:map?"video/mp4":"video/mp2t"}),a=h("a",{href:URL.createObjectURL(blob),download:name+(map?".mp4":".ts")});
-  document.body.append(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},4000)}
+  const dl=uri.replace("/u/","/dl/")+"?name="+encodeURIComponent(name);
+  const r=await fetch(dl+"&check=1");let j={};try{j=await r.json()}catch(e){}
+  if(!r.ok||!j.ok)throw new Error(j.error||"Download is not available for this stream.");
+  const a=h("a",{href:dl});document.body.append(a);a.click();setTimeout(()=>a.remove(),1000)}
 
 /* ---------- watch ---------- */
 async function watchPage(slug,season,episode){killPlayer();const tok=WTOK,alive=()=>tok===WTOK;const s=bySlug(slug);if(!s)return go("#/");
@@ -258,21 +260,29 @@ async function watchPage(slug,season,episode){killPlayer();const tok=WTOK,alive=
     if(x.kind!=="mq"){const a=h("a",{href:x.url,download:title});document.body.append(a);a.click();a.remove();dlLabel.textContent="Download started in your browser.";return}
     if(!hls||!hls.levels.length){dlLabel.textContent="Wait for the video to load first.";return}
     const k=qSel>=0?qSel:hls.levels.reduce((b,l,i,arr)=>l.height>arr[b].height?i:b,0),L=hls.levels[k],uri=L.uri||(L.url&&L.url[0]);
-    dlBtn.disabled=true;dlBar.style.width="0";dlLabel.textContent="Starting…";
-    try{await downloadLevel(uri,(title+" "+(L.height||"")+"p").replace(/[^\w\- ]+/g,"").trim().replace(/ +/g,"_"),dlBar,dlLabel);dlLabel.textContent="Done. Saved to your Downloads. Plays in VLC or MX Player."}
+    dlBtn.disabled=true;dlBar.style.width="0";dlLabel.textContent="Preparing…";
+    try{await downloadLevel(uri,(title+" "+(L.height||"")+"p").replace(/[^\w\- ]+/g,"").trim().replace(/ +/g,"_"),dlBar,dlLabel);dlLabel.textContent="Download started. Check your browser\u2019s downloads. The file plays in VLC or MX Player."}
     catch(e){dlLabel.textContent=e.message;dlBar.style.width="0"}dlBtn.disabled=false};
-  function play(i){cur=i;clearInterval(saveTimer);if(hls){hls.destroy();hls=null}qSel=-1;msg.style.display="flex";msg.textContent="Loading…";sels.replaceChildren(speed);
+  const tried=new Set();
+  function play(i){cur=i;tried.add(i);clearInterval(saveTimer);clearInterval(wdT);if(hls){hls.destroy();hls=null}qSel=-1;msg.style.display="flex";msg.textContent="Loading…";sels.replaceChildren(speed);
     const x=src[i];store.set("lang",x.lang);
     langBox.replaceChildren(...src.map((y,j)=>h("button",{class:"chip","aria-pressed":String(j===i),onclick:()=>play(j)},y.lang+(y.quality?" "+y.quality:""))));
-    const bad=t=>{msg.style.display="flex";msg.textContent=t||"This stream failed to load. Try another language."};
+    const bad=t=>{msg.style.display="flex";msg.replaceChildren(h("div",{},t||"This stream failed to load.",h("div",{style:"margin-top:12px"},h("button",{class:"chip",onclick:()=>{tried.clear();play(cur)}},"↻ Retry"))))};
+    const fallback=()=>{const nx=src.findIndex((y,j)=>!tried.has(j));if(nx<0)return false;msg.style.display="flex";msg.textContent="Switching to "+src[nx].lang+"…";play(nx);return true};
     const hideMsg=()=>{msg.style.display="none";buf.style.display="none"};let stallT=0;
     video.onplaying=hideMsg;video.onloadeddata=hideMsg;video.oncanplay=hideMsg;
-    video.onwaiting=()=>{if(msg.style.display!=="flex")buf.style.display="block";clearTimeout(stallT);stallT=setTimeout(()=>{if(hls&&video.readyState<3)hls.startLoad(video.currentTime||-1)},12000)};
+    video.onwaiting=()=>{if(msg.style.display!=="flex")buf.style.display="block"};
+    video.onseeking=()=>{if(msg.style.display!=="flex")buf.style.display="block"};
+    let lastT=-1,stuck=0,rec=0;
+    wdT=setInterval(()=>{if(!hls)return;const t=video.currentTime;
+      if(video.readyState<3&&(video.seeking||!video.paused)){if(Math.abs(t-lastT)<0.01)stuck++;else{stuck=0;lastT=t}
+        if(stuck>=3){stuck=0;rec++;hls.stopLoad();hls.startLoad(t);if(rec%3===0)hls.recoverMediaError()}}
+      else{stuck=0;lastT=t}},2000);
     video.onseeked=()=>{if(video.readyState>=3)buf.style.display="none"};
-    video.onerror=()=>{if(!hls)bad()};video.onloadedmetadata=()=>{if(resume){video.currentTime=resume;resume=0}};
+    video.onerror=()=>{if(!hls&&!fallback())bad()};video.onloadedmetadata=()=>{if(resume){video.currentTime=resume;resume=0}};
     saveTimer=setInterval(()=>{if(!video.paused)save()},10000);video.onpause=()=>{if(!video.ended)save()};
-    if(x.kind==="mq"&&window.Hls&&Hls.isSupported()){const pol=(n,d)=>({default:{maxTimeToFirstByteMs:20000,maxLoadTimeMs:60000,timeoutRetry:{maxNumRetry:n,retryDelayMs:0,maxRetryDelayMs:0},errorRetry:{maxNumRetry:n+2,retryDelayMs:d,maxRetryDelayMs:8000}}});
-      hls=new Hls({maxBufferLength:60,maxMaxBufferLength:120,backBufferLength:40,capLevelToPlayerSize:true,startFragPrefetch:true,manifestLoadPolicy:pol(3,1000),levelLoadPolicy:pol(3,1000),fragLoadPolicy:pol(4,1000)});
+    if(x.kind==="mq"&&window.Hls&&Hls.isSupported()){const pol=(n,d,ttfb,load)=>({default:{maxTimeToFirstByteMs:ttfb,maxLoadTimeMs:load,timeoutRetry:{maxNumRetry:n,retryDelayMs:0,maxRetryDelayMs:0},errorRetry:{maxNumRetry:n+2,retryDelayMs:d,maxRetryDelayMs:6000}}});
+      hls=new Hls({maxBufferLength:30,maxMaxBufferLength:60,maxBufferSize:40*1e6,backBufferLength:15,maxBufferHole:0.6,nudgeMaxRetry:8,capLevelToPlayerSize:true,startFragPrefetch:true,abrBandWidthFactor:0.8,abrBandWidthUpFactor:0.6,manifestLoadPolicy:pol(3,1000,10000,20000),levelLoadPolicy:pol(3,1000,10000,20000),fragLoadPolicy:pol(4,800,12000,30000)});
       let netTry=0,medTry=0;hls.loadSource(x.url);hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED,()=>{video.play().catch(()=>{hideMsg()});
         if(hls.levels.length>1)sels.prepend(h("select",{onchange:e=>{qSel=+e.target.value;hls.currentLevel=qSel}},h("option",{value:-1},"Quality: Auto"),hls.levels.map((l,k)=>({l,k})).sort((a,b)=>b.l.height-a.l.height).map(({l,k})=>h("option",{value:k},"Quality: "+l.height+"p"))))});
@@ -282,7 +292,7 @@ async function watchPage(slug,season,episode){killPlayer();const tok=WTOK,alive=
       hls.on(Hls.Events.ERROR,(_e,d)=>{if(!d.fatal)return;
         if(d.type===Hls.ErrorTypes.NETWORK_ERROR&&netTry++<4){buf.style.display="block";setTimeout(()=>{if(hls)hls.startLoad(video.currentTime||-1)},1500*netTry)}
         else if(d.type===Hls.ErrorTypes.MEDIA_ERROR&&medTry++<3){if(medTry===2)hls.swapAudioCodec();hls.recoverMediaError()}
-        else bad(src.length>1?"This stream failed to load. Try another language above.":"This stream failed to load. Please try again in a moment.")})}
+        else if(!fallback())bad("This stream failed to load. Please try again in a moment.")})}
     else{video.src=x.url;video.play().catch(()=>{hideMsg()})}}
   play(cur)}
 
