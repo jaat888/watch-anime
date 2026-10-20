@@ -24,7 +24,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 lxml
+          pip install requests beautifulsoup4 lxml curl_cffi
 
       - name: Run crawler (builds streams.json)
         run: python crawler.py
