@@ -1753,15 +1753,16 @@ def _short_desc(t, n=320):
 
 def api_shows():
     """Compact list for the website grid (name, slug, poster, movie?)."""
+    items = []
     with STORE_LOCK:
-        items = [{"slug": r["slug"], "name": r["name"],
-                  "poster": r.get("poster") or "", "movie": bool(r["movie"]),
-                  "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i,
-                  "le": _latest_ep(r), "genres": _show_genres(r),
-                  "rating": _show_info(r).get("r"),
-                  "d": _short_desc(_show_info(r).get("d")),
-                  "n": sum(1 for k in r["eps"] if k[0])}
-                 for i, r in enumerate(SHOWS.values())]
+        for i, r in enumerate(SHOWS.values()):
+            info = _show_info(r)          # one lookup per show
+            items.append({"slug": r["slug"], "name": r["name"],
+                          "poster": r.get("poster") or "", "movie": bool(r["movie"]),
+                          "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i,
+                          "le": _latest_ep(r), "genres": info.get("g", []),
+                          "rating": info.get("r"), "d": _short_desc(info.get("d")),
+                          "n": sum(1 for k in r["eps"] if k[0])})
     upd = _updates()
     for it in items:
         it["upd"] = int(upd.get(it["slug"], 0))
@@ -1868,6 +1869,26 @@ def _tn_match(idx, keys, item):
     return hit
 
 
+_disc_cache = {"t": 0, "data": []}
+
+
+def _tmdb_discover_anime():
+    if _disc_cache["data"] and time.time() - _disc_cache["t"] < TREND_TTL:
+        return _disc_cache["data"]
+    out = []
+    for kind in ("tv", "movie"):
+        for page in range(1, 7):
+            try:
+                out += _tmdb_get(f"/discover/{kind}", with_genres=16,
+                                 with_original_language="ja",
+                                 sort_by="popularity.desc", page=page).get("results") or []
+            except Exception as e:
+                print(f"[rt2] tmdb discover {kind} p{page} failed: {repr(e)}", flush=True)
+    if out:
+        _disc_cache.update(t=time.time(), data=out)
+    return out or _disc_cache["data"]
+
+
 def _tmdb_trending_slugs(window):
     """-> [slug, ...] ordered by TMDB trending rank (best first)."""
     idx = _tn_index()
@@ -1893,19 +1914,10 @@ def _tmdb_trending_slugs(window):
             anim = [r for r in res if 16 in (r.get("genre_ids") or [])]
             for r in anim + [r for r in res if r not in anim]:
                 take(r)
-    # fill: most popular Japanese animation on TMDB right now
-    for kind in ("tv", "movie"):
-        for page in range(1, 7):
-            try:
-                res = _tmdb_get(f"/discover/{kind}", with_genres=16,
-                                with_original_language="ja",
-                                sort_by="popularity.desc", page=page).get("results") or []
-            except Exception as e:
-                print(f"[rt2] tmdb discover {kind} p{page} failed: {repr(e)}", flush=True)
-                continue
-            ok = ok or bool(res)
-            for r in res:
-                take(r)
+    # fill: most popular Japanese animation on TMDB right now (shared by day+week)
+    for r in _tmdb_discover_anime():
+        ok = True
+        take(r)
     if not ok:
         raise RuntimeError("tmdb trending unavailable")
     return out

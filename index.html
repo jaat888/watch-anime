@@ -2,6 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script>
+/* lite mode = no animations/blur: Android TV, smart TVs, old browsers, low-end devices, reduced-motion.
+   Force with ?lite=1 (on) or ?lite=0 (off); the choice is remembered. */
+(function(){var d=document.documentElement,ua=navigator.userAgent||"",v=null;
+try{var m=/[?&]lite=(\d)/.exec(location.search);if(m){v=m[1]==="1";localStorage.setItem("lite",v?"1":"0")}else{var s=localStorage.getItem("lite");if(s!==null)v=s==="1"}}catch(e){}
+if(v===null){var mm=function(q){try{return matchMedia(q).matches}catch(e){return false}};
+var tv=/(\bTV\b|SMART-?TV|BRAVIA|\bAFT[A-Z0-9]*\b|SHIELD|MIBOX|MITV|Chromecast|CrKey|HbbTV|Tizen|Web0S|WebOS|NetCast|Roku|AppleTV|VIDAA|Hisense|Philips|GoogleTV|Fire ?TV)/i.test(ua)||(/Android/.test(ua)&&!/Mobile|Tablet|SM-T|Pad/i.test(ua)&&!mm("(pointer:coarse)"));
+var old=!Element.prototype.replaceChildren,low=navigator.deviceMemory&&navigator.deviceMemory<=1;
+v=tv||old||low||mm("(prefers-reduced-motion:reduce)")}
+if(v)d.className+=" lite"})();
+</script>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a0d">
 <title>mollad_jaat — Watch Anime</title>
@@ -57,11 +68,11 @@ html{scroll-padding-bottom:calc(var(--nh,70px) + 16px)}
 .sub{font-size:12px;color:var(--dim)}
 
 /* hero */
-.hero{position:relative;border-radius:22px;overflow:hidden;min-height:330px;display:flex;align-items:flex-end;margin:8px 0 12px;background:var(--panel2);box-shadow:var(--shadow)}
+.hero{position:relative;border-radius:22px;overflow:hidden;min-height:372px;display:flex;align-items:flex-end;margin:8px 0 12px;background:var(--panel2);box-shadow:var(--shadow)}
 .hero{touch-action:pan-y;user-select:none;-webkit-user-select:none}
 .hero .bg{position:absolute;inset:0;background-size:cover;background-position:center 20%;transform:scale(1.25);filter:blur(26px) brightness(.62) saturate(1.2);animation:hfade .45s ease-out}
 .hero.land .bg{transform:scale(1.02);filter:none}
-.hero .art{position:absolute;z-index:1;right:18px;top:38px;height:150px;width:auto;max-width:42%;border-radius:12px;object-fit:cover;box-shadow:0 10px 30px rgba(0,0,0,.55);animation:hfade .45s ease-out}
+.hero .art{position:absolute;z-index:1;right:18px;top:44px;height:122px;width:auto;max-width:36%;border-radius:12px;object-fit:cover;box-shadow:0 10px 30px rgba(0,0,0,.55);animation:hfade .45s ease-out}
 .hero.land .art{display:none}
 @keyframes hfade{from{opacity:0}to{opacity:1}}
 .seg{position:absolute;left:16px;right:16px;top:12px;z-index:3;display:flex;gap:5px}
@@ -70,7 +81,7 @@ html{scroll-padding-bottom:calc(var(--nh,70px) + 16px)}
 .seg .done i{width:100%}.seg .on i{animation:segfill linear forwards}
 @keyframes segfill{from{width:0}to{width:100%}}
 .hero::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.05) 0%,rgba(0,0,0,.25) 35%,rgba(10,10,13,.94) 100%)}
-.hero .hin{position:relative;z-index:1;padding:18px 18px 20px;color:#fff;width:100%}
+.hero .hin{position:relative;z-index:1;padding:36px 18px 20px;color:#fff;width:100%}
 .hero .in2{min-width:0;max-width:620px}
 .hero h1{margin:8px 0 4px;font-size:28px;line-height:1.08;font-weight:900;font-style:italic;letter-spacing:-.5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 2px 14px rgba(0,0,0,.5)}
 .hero .hg{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}
@@ -96,6 +107,7 @@ h2.sec{font-size:19px;font-weight:800;margin:26px 0 12px;display:flex;justify-co
 .card:active{transform:scale(.965);transition-duration:.08s}
 .pw{position:relative;aspect-ratio:16/9;width:100%;overflow:hidden;background:var(--panel2)}
 .pw .poster,.pw .ph{position:absolute;top:0;right:0;bottom:0;left:0;width:100%;height:100%;display:block;object-fit:cover;object-position:center 22%}
+.pw .ph{display:flex;align-items:center;justify-content:center}
 .pw .bgb{position:absolute;top:-12px;right:-12px;bottom:-12px;left:-12px;background-size:cover;background-position:center;filter:blur(16px) brightness(.62) saturate(1.2);display:none}
 .pw.pt .bgb{display:block}.pw.pt .poster{object-fit:contain;object-position:center}
 .ph{display:flex;align-items:center;justify-content:center;font-size:38px;font-weight:900;color:var(--accent);background:linear-gradient(135deg,var(--panel2),var(--panel))}
@@ -189,6 +201,25 @@ footer{text-align:center;color:var(--dim);font-size:13px;padding:30px 16px 96px}
 .sb{background:none;border:0;padding:8px 0;width:54px;font-weight:700;font-size:13px}.sb+.sb{border-left:1px solid var(--line)}.sb:active{background:var(--line)}
 .csel{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}.csel select{padding:7px 10px;font-size:13px;width:auto;max-width:150px}
 .panel.slim{padding:12px 14px;gap:10px}
+/* ---------- motion (laptop + phone only; html.lite = TV/low-end = static) ---------- */
+@keyframes cin{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes pgin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes hup{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+html:not(.lite) #app>*:not(.rail){animation:pgin .32s cubic-bezier(.2,.7,.2,1) backwards}
+html:not(.lite) .rail>*{animation:cin .45s cubic-bezier(.2,.7,.2,1) backwards}
+html:not(.lite) .rail>*:nth-child(2){animation-delay:.04s}html:not(.lite) .rail>*:nth-child(3){animation-delay:.08s}html:not(.lite) .rail>*:nth-child(4){animation-delay:.12s}html:not(.lite) .rail>*:nth-child(5){animation-delay:.16s}html:not(.lite) .rail>*:nth-child(6){animation-delay:.2s}html:not(.lite) .rail>*:nth-child(n+7){animation-delay:.24s}
+html:not(.lite) .hero .in2>*{animation:hup .5s cubic-bezier(.2,.7,.2,1) backwards}
+html:not(.lite) .hero .in2>*:nth-child(2){animation-delay:.05s}html:not(.lite) .hero .in2>*:nth-child(3){animation-delay:.1s}html:not(.lite) .hero .in2>*:nth-child(4){animation-delay:.15s}html:not(.lite) .hero .in2>*:nth-child(5){animation-delay:.2s}html:not(.lite) .hero .in2>*:nth-child(6){animation-delay:.25s}
+html:not(.lite){scroll-behavior:smooth}
+@media(hover:hover){
+html:not(.lite) .card:hover{transform:translateY(-5px);border-color:var(--accent);box-shadow:0 14px 30px rgba(0,0,0,.35)}
+html:not(.lite) .card .poster{transition:transform .5s cubic-bezier(.2,.7,.2,1)}
+html:not(.lite) .card:hover .poster{transform:scale(1.06)}
+html:not(.lite) .pri:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(255,83,48,.45)}}
+html.lite *,html.lite *::before,html.lite *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+html.lite .hero .bg,html.lite .pw .bgb,html.lite .top .bg{filter:brightness(.55)!important}
+html.lite .seg .on i{width:100%}
+html.lite .sk{background:var(--panel2)}
 @media(prefers-reduced-motion:reduce){.sk,.seg .on i,.hero .bg,.hero .art{animation:none}.seg .on i{width:100%}}
 
 /* old-browser (old TV Chrome) fallbacks */
@@ -241,6 +272,7 @@ window.addEventListener("error",function(e){showErr("Error: "+e.message+" (line 
 const $app=document.getElementById("app"),$q=document.getElementById("q"),$nav=document.getElementById("nav");
 let SHOWS=null,NOW=0,POP=[],TREND=[],TRENDD=[],filter="all",lang="all",genre="all",shown=60,hls=null,ME=null,PROG=[],FAVS=[],saveTimer=null,heroTimer=null,nextTimer=null,installEvt=null;
 const META={},INFO={};
+const LITE=document.documentElement.classList.contains("lite");
 const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}},del(k){try{localStorage.removeItem(k)}catch(e){}}};
 function h(tag,a,...kids){const el=document.createElement(tag);for(const[k,v]of Object.entries(a||{})){if(k==="class")el.className=v;else if(k.startsWith("on"))el.addEventListener(k.slice(2),v);else if(v===true)el.setAttribute(k,"");else if(v!==false&&v!=null)el.setAttribute(k,v)}for(const c of kids.flat())if(c!=null)el.append(c.nodeType?c:document.createTextNode(c));return el}
 async function api(url,body){const o={headers:{}},t=store.get("token");if(t)o.headers.Authorization="Bearer "+t;
@@ -248,8 +280,8 @@ async function api(url,body){const o={headers:{}},t=store.get("token");if(t)o.he
   const r=await fetch(url,o);let j={};try{j=await r.json()}catch(e){}if(!r.ok){const e=new Error(j.error||r.status);e.status=r.status;throw e}return j}
 const go=x=>{location.hash=x};
 let WTOK=0,curVideo=null;
-let wdT=0;function killPlayer(){WTOK++;clearInterval(wdT);clearInterval(saveTimer);clearInterval(heroTimer);clearInterval(nextTimer);if(hls){hls.destroy();hls=null}if(curVideo){try{curVideo.pause();curVideo.removeAttribute("src");curVideo.load()}catch(e){}curVideo=null}}
-let txT=0;function setTheme(t,anim){const r=document.documentElement;if(anim){r.classList.add("tx");clearTimeout(txT);txT=setTimeout(()=>r.classList.remove("tx"),480)}r.dataset.theme=t;store.set("theme",t);const m=document.querySelector('meta[name="theme-color"]');if(m)m.content=t==="dark"?"#0a0a0d":"#f5f3ef"}
+let wdT=0;function killPlayer(){WTOK++;clearInterval(wdT);clearInterval(saveTimer);clearInterval(heroTimer);clearTimeout(heroTimer);clearInterval(nextTimer);if(hls){hls.destroy();hls=null}if(curVideo){try{curVideo.pause();curVideo.removeAttribute("src");curVideo.load()}catch(e){}curVideo=null}}
+let txT=0;function setTheme(t,anim){const r=document.documentElement;if(anim&&!LITE){r.classList.add("tx");clearTimeout(txT);txT=setTimeout(()=>r.classList.remove("tx"),480)}r.dataset.theme=t;store.set("theme",t);const m=document.querySelector('meta[name="theme-color"]');if(m)m.content=t==="dark"?"#0a0a0d":"#f5f3ef"}
 setTheme(store.get("theme")||"dark");
 document.getElementById("theme").onclick=()=>setTheme(document.documentElement.dataset.theme==="dark"?"light":"dark",true);
 addEventListener("beforeinstallprompt",e=>{e.preventDefault();installEvt=e});
@@ -288,7 +320,7 @@ const skRail=()=>[h("h2",{class:"sec"},h("span",{class:"sk sk-h"})),h("div",{cla
 const skHome=()=>[h("div",{class:"hero sk","aria-busy":"true"}),...skRail(),...skRail()];
 const skShow=()=>[h("div",{class:"back"},"\u00a0"),h("div",{class:"hero sk",style:"min-height:230px"}),h("h2",{class:"sec"},h("span",{class:"sk sk-h"})),h("div",{class:"eps"},Array.from({length:14},()=>h("div",{class:"ep sk"})))];
 async function loadShows(){if(SHOWS)return;$app.replaceChildren(...skHome());const j=await api("/api/shows");SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[]}
-const bySlug=s=>SHOWS.find(x=>x.slug===s);
+let SMAP=null;const bySlug=s=>{if(!SHOWS)return undefined;if(!SMAP||SMAP.size!==SHOWS.length)SMAP=new Map(SHOWS.map(x=>[x.slug,x]));return SMAP.get(s)};
 const isNew=s=>s.upd&&NOW-s.upd<7*86400;
 async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<120000)return c.v;let v=[];try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie)META[s.slug]={t:Date.now(),v};else if(c)return c.v;return v}
 function posterEl(s){const w=h("div",{class:"pw"}),f=()=>h("div",{class:"ph"},(s.name[0]||"?").toUpperCase());if(!s.poster){w.append(f());return w}
@@ -316,7 +348,7 @@ function heroDesc(s,resume,box){const d=s.d;if(!d)return null;
   const b=h("button",{class:"hmore",onclick:e=>{e.stopPropagation();const o=p.classList.toggle("open");b.textContent=o?"Show less":"Show more";box.classList.toggle("hold",o);if(o)clearTimeout(heroTimer);else resume()}},"Show more");
   return h("div",{},p,b)}
 function heroEl(items){
-  const box=h("div",{class:"hero"}),D=6000,N=items.length;let i=0,sx=0,sy=0;
+  const box=h("div",{class:"hero"}),D=LITE?10000:6000,N=items.length;let i=0,sx=0,sy=0;
   const to=k=>{clearTimeout(heroTimer);i=(k+N)%N;draw()};
   function draw(){const {s,p}=items[i],nw=isNew(s);box.className="hero";
     /* landscape poster -> full-bleed; portrait poster -> blurred backdrop + sharp poster beside the title */
@@ -325,10 +357,11 @@ function heroEl(items){
     box.replaceChildren(...[h("div",{class:"bg",style:bgStyle(s)}),art,
       N>1?h("div",{class:"seg"},items.map((_,k)=>h("button",{"aria-label":"Slide "+(k+1),class:k<i?"done":k===i?"on":"",onclick:()=>to(k)},h("i",{style:k===i?"animation-duration:"+D+"ms":""})))):null,
       h("div",{class:"hin"},
-      h("div",{class:"in2"},h("span",{class:"tag"},p?"Continue watching":nw&&s.le?"New episode · S"+s.le[0]+" E"+s.le[1]:"#"+(i+1)+" Trending"),(s.genres||[]).length?h("div",{class:"hg"},s.genres.slice(0,4).map(x=>h("span",{},x))):null,h("h1",{},s.name),heroDesc(s,()=>{clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(()=>to(i+1),D)},box),
+      h("div",{class:"in2"},h("span",{class:"tag"},p?"Continue watching":nw&&s.le?"New episode · S"+s.le[0]+" E"+s.le[1]:"#"+(i+1)+" Trending"),(s.genres||[]).length?h("div",{class:"hg"},s.genres.slice(0,4).map(x=>h("span",{},x))):null,h("h1",{},s.name),heroDesc(s,()=>{clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(tick,D)},box),
         h("div",{class:"meta"},((s.langs||[]).length?s.langs.slice(0,3).join(" · ")+" Dub":"Anime")+" • Free"),
         h("div",{class:"row2",style:"margin-top:12px"},h("button",{class:"pri",onclick:()=>go(p?resumeLink(s,p).slice(1):nw?epLink(s).slice(1):"#/show/"+s.slug)},p?"▶ Resume"+(s.movie?"":" S"+p.season+" E"+p.episode):"▶ Watch now"),h("button",{class:"glass",onclick:()=>go("#/show/"+s.slug)},"Details"))))].filter(Boolean));
-    clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(()=>to(i+1),D)}
+    clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(tick,D)}
+  const tick=()=>{if(!box.isConnected)return;if(document.hidden||box.classList.contains("hold")){heroTimer=setTimeout(tick,D);return}to(i+1)};
   /* swipe left / right to change slide */
   box.addEventListener("touchstart",e=>{const t=e.touches[0];sx=t.clientX;sy=t.clientY},{passive:true});
   box.addEventListener("touchend",e=>{if(N<2)return;const t=e.changedTouches[0],dx=t.clientX-sx,dy=t.clientY-sy;if(Math.abs(dx)>45&&Math.abs(dx)>Math.abs(dy)*1.5)to(i+(dx<0?1:-1))},{passive:true});
@@ -348,10 +381,10 @@ function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=t
     let trend=mapT(TREND.length?TREND:POP);
     if(trend.length<30){const have=new Set(trend.map(s=>s.slug));trend=trend.concat(SHOWS.filter(s=>A(s)&&s.poster&&!have.has(s.slug)).sort((a,b)=>(b.rating||0)-(a.rating||0)||b.ord-a.ord).slice(0,30-trend.length))}
     const trendP=trend.filter(s=>s.poster);
-    const heroItems=[...cont.slice(0,1),...(trendP.length>=3?trendP:latest.filter(s=>s.poster)).slice(0,6).map(s=>({s}))];
+    const c0=cont[0],heroItems=[...(c0?[c0]:[]),...(trendP.length>=3?trendP:latest.filter(s=>s.poster)).filter(s=>!c0||s.slug!==c0.s.slug).slice(0,LITE?4:6).map(s=>({s}))];
     if(heroItems.length)kids.push(heroEl(heroItems));
-    if(trendD.length>=4)kids.push(...rail("⚡ Trending today",trendD.slice(0,60)));
-    if(trend.length>=4)kids.push(...rail("🚀 Trending this week",trend.slice(0,80)));
+    if(trendD.length>=4)kids.push(...rail("⚡ Trending today",trendD.slice(0,LITE?30:60)));
+    if(trend.length>=4)kids.push(...rail("🚀 Trending this week",trend.slice(0,LITE?30:80)));
     kids.push(...rail("🔥 Latest episodes",fresh.slice(0,20),null,epCard));
     if(ME)kids.push(...rail("▶ Continue watching",cont.slice(0,15),null,({p,s})=>card(s,p.dur?Math.min(100,p.pos/p.dur*100):0,()=>go(resumeLink(s,p).slice(1)))));
     if(ME)kids.push(...rail("❤ My List",FAVS.map(bySlug).filter(Boolean).slice(0,20),()=>go("#/list")));
@@ -359,8 +392,8 @@ function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=t
     const pop=POP.map(bySlug).filter(Boolean);if(pop.length>=4)kids.push(...rail("⭐ Popular",pop));
     const top=SHOWS.filter(s=>s.rating>=7.5&&s.poster).sort((a,b)=>b.rating-a.rating).slice(0,20);if(top.length>=4)kids.push(...rail("🏆 Top rated",top));
     const gc={};SHOWS.forEach(s=>{if(A(s)&&s.poster)(s.genres||[]).forEach(g=>{gc[g]=(gc[g]||0)+1})});
-    Object.keys(gc).filter(g=>gc[g]>=6).sort((a,b)=>gc[b]-gc[a]).slice(0,12).forEach(g=>{
-      const l=SHOWS.filter(s=>A(s)&&s.poster&&(s.genres||[]).includes(g)).sort((a,b)=>(b.rating||0)-(a.rating||0)||b.ord-a.ord).slice(0,24);
+    Object.keys(gc).filter(g=>gc[g]>=6).sort((a,b)=>gc[b]-gc[a]).slice(0,LITE?6:12).forEach(g=>{
+      const l=SHOWS.filter(s=>A(s)&&s.poster&&(s.genres||[]).includes(g)).sort((a,b)=>(b.rating||0)-(a.rating||0)||b.ord-a.ord).slice(0,LITE?16:24);
       kids.push(...rail(g,l,()=>{filter="all";lang="all";genre=g;shown=60;home()}))});
     for(const L of ["Hindi","Tamil","Telugu"]){const l=SHOWS.filter(s=>(s.langs||[]).includes(L)&&!s.movie&&A(s)&&s.poster).sort((a,b)=>b.upd-a.upd||a.name.localeCompare(b.name)).slice(0,20);
       kids.push(...rail("🎌 "+L+" anime",l,()=>{lang=L;filter="anime";shown=60;home()}))}
