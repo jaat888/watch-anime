@@ -57,6 +57,7 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote, urljoin
 
 import accounts
+import genres as G
 import requests
 from curl_cffi import requests as creq
 
@@ -152,7 +153,9 @@ def _display(show):
 
 SHOWS = {}
 
-# slug -> {"v":2, "g": [genres], "d": overview, "t": epoch, "nf": not-found}
+# slug -> {"v":3, "g": [genres], "d": overview, "r": rating 0-10, "rs": "mal"|"tmdb",
+#           "rt": tmdb rating, "rm": mal rating, "t": epoch, "nf": not-found,
+#           "jf": jikan failed (retry sooner)}
 # Stored in SQL (accounts.tmdb) so it survives restarts/redeploys; loaded
 # before _build_shows() so the first /api/shows already has genres.
 _tmdb_lock = threading.Lock()
@@ -160,6 +163,7 @@ _TMDB_CACHE = {}
 _TMDB_FAIL = {}          # slug -> time of last failed lookup (memory only)
 TMDB_RETRY = 600         # retry a failed lookup after ~10 min
 TMDB_NF_TTL = 24 * 3600  # "TMDB has no such title" is rechecked daily
+JIKAN_RETRY_TTL = 3600   # entry saved without Jikan data -> retry after 1 h
 
 
 def _tmdb_load_cache():
@@ -204,6 +208,7 @@ def _build_shows():
         rec["poster"] = rec["poster"] or POSTERS.get(rec["site_name"], "")
         rec["genres"] = _TMDB_CACHE.get(rec["slug"], {}).get("g", [])
         rec["desc"] = _TMDB_CACHE.get(rec["slug"], {}).get("d", "")
+        rec["rating"] = _TMDB_CACHE.get(rec["slug"], {}).get("r")
 
 
 _build_shows()
@@ -943,9 +948,14 @@ def _tmdb_clean(name):
     return s or (name or "")
 
 
-def _tmdb_lookup(name, is_movie):
-    """-> {"v":2,"g":[...],"d":"...","t":ts[, "nf":1]}.  RAISES on any
-    network/API failure so the caller can skip caching."""
+def _tmdb_lookup(name, is_movie, anime=True):
+    """-> {"v":3,"g":[...],"d":"...","r":8.1,"rs":"mal","t":ts[, "nf":1]}.
+    TMDB failures RAISE (caller skips caching).  Jikan failures do not:
+    the TMDB data is kept and flagged "jf" so Jikan is retried in 1 h.
+
+    Genres are always normalised through genres.py.  For anime, Jikan
+    (MyAnimeList) wins for genres + rating, TMDB fills whatever is
+    missing; cartoons use TMDB only."""
     kind = "movie" if is_movie else "tv"
     results = []
     for query in dict.fromkeys([_tmdb_clean(name), name]):
@@ -954,22 +964,50 @@ def _tmdb_lookup(name, is_movie):
         results = _tmdb_get(f"/search/{kind}", query=query).get("results") or []
         if results:
             break
-    if not results:
-        return {"v": 2, "g": [], "d": "", "t": time.time(), "nf": 1}
-    top = results[:10]
-    anim = [r for r in top if 16 in (r.get("genre_ids") or [])]   # 16 = Animation
-    pool = anim or top
-    best = next((r for r in pool if r.get("overview")), pool[0])
-    ids = best.get("genre_ids") or []
-    gm = _tmdb_genre_map(kind) if ids else {}
-    return {"v": 2, "g": [gm[i] for i in ids if i in gm],
-            "d": (best.get("overview") or "").strip(), "t": time.time()}
+    tm = {"g": [], "d": "", "r": None}
+    if results:
+        top = results[:10]
+        anim = [r for r in top if 16 in (r.get("genre_ids") or [])]   # 16 = Animation
+        pool = anim or top
+        best = next((r for r in pool if r.get("overview")), pool[0])
+        ids = best.get("genre_ids") or []
+        gm = _tmdb_genre_map(kind) if ids else {}
+        tm["g"] = [gm[i] for i in ids if i in gm]
+        tm["d"] = (best.get("overview") or "").strip()
+        va, vc = best.get("vote_average") or 0, best.get("vote_count") or 0
+        if va > 0 and vc >= 5:              # ignore 1-2 vote noise
+            tm["r"] = round(float(va), 1)
+    mal, jf = None, 0
+    if anime:
+        try:
+            mal = G.jikan_lookup(_tmdb_clean(name), is_movie)
+        except Exception as e:
+            jf = 1
+            print(f"[rt2] jikan lookup FAILED for '{name}': {repr(e)}", flush=True)
+    if not results and not mal:
+        info = {"v": 3, "g": [], "d": "", "r": None, "t": time.time(), "nf": 1}
+        if jf:
+            info["jf"] = 1
+        return info
+    mal_r = round(float(mal["score"]), 1) if mal and mal.get("score") else None
+    rating, src = (mal_r, "mal") if mal_r else ((tm["r"], "tmdb") if tm["r"] else (None, ""))
+    info = {"v": 3,
+            "g": G.normalize((mal or {}).get("genres"), tm["g"]) if mal
+                 else G.normalize(tm["g"]),
+            "d": tm["d"] or (mal or {}).get("synopsis", ""),
+            "r": rating, "rs": src, "rt": tm["r"], "rm": mal_r,
+            "t": time.time()}
+    if jf:
+        info["jf"] = 1
+    return info
 
 
 def _tmdb_fresh(hit):
-    if not hit or hit.get("v") != 2:      # old/empty entries -> refetch
+    if not hit or hit.get("v") != 3:      # old/empty entries -> refetch
         return False
     ttl = TMDB_NF_TTL if hit.get("nf") else TMDB_TTL
+    if hit.get("jf"):                     # Jikan was down: try again soon
+        ttl = min(ttl, JIKAN_RETRY_TTL)
     return time.time() - hit.get("t", 0) < ttl
 
 
@@ -978,20 +1016,21 @@ def _tmdb_refresh(rec):
     time only in memory (retry in ~10 min).  Returns True on success."""
     slug = rec["slug"]
     try:
-        info = _tmdb_lookup(rec.get("name") or rec.get("site_name") or slug,
-                            bool(rec.get("movie")))
+        nm = rec.get("name") or rec.get("site_name") or slug
+        info = _tmdb_lookup(nm, bool(rec.get("movie")),
+                            anime=_kind(nm) == "anime")
     except Exception as e:
         _TMDB_FAIL[slug] = time.time()
         print(f"[rt2] tmdb lookup FAILED for '{slug}': {repr(e)}", flush=True)
         return False
     _TMDB_FAIL.pop(slug, None)
     _tmdb_store(slug, info)
-    rec["genres"], rec["desc"] = info["g"], info["d"]
+    rec["genres"], rec["desc"], rec["rating"] = info["g"], info["d"], info.get("r")
     return True
 
 
 def _show_info(rec, wait=0):
-    """Cached {"g","d"} for a show.  On a miss starts a background TMDB
+    """Cached {"g","d","r","rs"} for a show.  On a miss starts a background TMDB
     lookup (optionally waits up to `wait` seconds for it)."""
     slug = rec["slug"]
     hit = _TMDB_CACHE.get(slug)
@@ -1411,6 +1450,8 @@ def handle_meta(mtype, mid):
                         "carries, streamed in-app as multi-quality HLS."),
         "overview": info.get("d") or "",
         "genres": info.get("g") or ["Animation"],
+        "rating": info.get("r"),
+        "ratingSource": {"mal": "MyAnimeList", "tmdb": "TMDB"}.get(info.get("rs"), ""),
         "videos": [],
     }
     if not rec["movie"]:
@@ -1709,6 +1750,7 @@ def api_shows():
                   "poster": r.get("poster") or "", "movie": bool(r["movie"]),
                   "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i,
                   "le": _latest_ep(r), "genres": _show_genres(r),
+                  "rating": _show_info(r).get("r"),
                   "n": sum(1 for k in r["eps"] if k[0])}
                  for i, r in enumerate(SHOWS.values())]
     upd = _updates()
