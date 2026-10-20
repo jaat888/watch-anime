@@ -238,6 +238,8 @@ html.lite .sk{background:var(--panel2)}
 .dots i{margin-left:5px}
 @media(min-width:760px){.hero .art{right:32px;top:40px;bottom:32px;height:auto;max-height:calc(100% - 72px)}.rail{grid-auto-columns:280px;margin:0;padding-left:0;padding-right:0}.grid{grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}.hero{min-height:420px}.hero h1{font-size:40px}.hero .hin{padding:30px}}
 
+.detail .row2{flex-wrap:nowrap;gap:8px}.detail .row2 .pri,.detail .row2 .glass{flex:1 1 0;min-width:0;max-width:none;padding:10px 8px;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:12px}
+.detail .row2>*{margin:0}
 /* ---------- TV / remote control ---------- */
 html.tv a:focus,html.tv button:focus,html.tv select:focus,html.tv input:focus,html.tv [tabindex]:focus{outline:4px solid var(--accent);outline-offset:3px}
 html.tv .card:focus,html.tv .ep:focus,html.tv .sr:focus{transform:scale(1.04);z-index:3;box-shadow:0 10px 30px rgba(0,0,0,.5)}
@@ -354,7 +356,22 @@ function posterEl(s){const w=h("div",{class:"pw"}),f=()=>h("div",{class:"ph"},(s
 const ovEl=s=>{const L=s.langs||[],a=L.length?L[0]+(L.length>1?" +"+(L.length-1):""):"",n=s.movie?"Movie":(s.n?s.n+" ep":"");
   return a||n?h("div",{class:"ov"},a?h("span",{class:"lg"},a):null,n?h("span",{class:"en"},n):null):null};
 const thumb=s=>{const w=posterEl(s),o=ovEl(s);if(o)w.append(o);return w};
-function card(s,pct,onclick){return h("button",{class:"card",onclick:onclick||(()=>go("#/show/"+s.slug))},thumb(s),s.rating?h("div",{class:"rt"},"★ "+(+s.rating).toFixed(1)):null,isNew(s)&&pct==null?h("div",{class:"badge"},"NEW"):null,pct!=null?h("div",{class:"prog"},h("i",{style:"width:"+pct+"%"})):null,h("div",{class:"t"},h("b",{},s.name),h("small",{},subOf(s))))}
+function card(s,pct,onclick){const mem=!onclick&&pct==null&&SHOWS?frMap()[frKey(s)]:null,g=mem&&mem.length>1;return h("button",{class:"card",onclick:g?()=>seasonPicker(baseName(s.name)||s.name,mem):(onclick||(()=>go("#/show/"+s.slug)))},thumb(s),s.rating?h("div",{class:"rt"},"★ "+(+s.rating).toFixed(1)):null,g?h("div",{class:"badge"},mem.length+" SEASONS"):isNew(s)&&pct==null?h("div",{class:"badge"},"NEW"):null,pct!=null?h("div",{class:"prog"},h("i",{style:"width:"+pct+"%"})):null,h("div",{class:"t"},h("b",{},g?(baseName(s.name)||s.name):s.name),h("small",{},g?mem.length+" seasons \u00b7 "+subOf(s):subOf(s))))}
+/* ---------- one card per anime: all its seasons grouped ---------- */
+const LANGW=/\s*[-\u2013]?\s*(hindi|tamil|telugu|malayalam|bengali|multi|dubbed|subbed|dub|sub|uncut|crunchyroll|jio\s*cinema)\b.*$/i;
+function baseName(n){n=String(n||"").replace(/\([^)]*\)/g," ").replace(LANGW,"").replace(/\bseason\s*\d+\b/ig," ").replace(/\bepisodes\b/ig," ");return n.replace(/\s+/g," ").replace(/^[\s\-\u2013]+|[\s\-\u2013]+$/g,"")}
+let FR=null;
+function frKey(s){return(s.movie?"m:":"s:")+baseName(s.name).toLowerCase().replace(/[^a-z0-9]+/g,"")}
+function seasonNo(s){const m=/season\s*0*(\d+)/i.exec(s.name);return m?+m[1]:0}
+function seasonLabel(s,i){const m=/season\s*0*(\d+)/i.exec(s.name),a=/\(([^)]{3,40})\)/.exec(s.name),arc=a&&!/hindi|tamil|telugu|dub|sub|multi|audio/i.test(a[1])?" \u00b7 "+a[1]:"";return(m?"Season "+(+m[1]):s.movie?"Movie":"Part "+(i+1))+arc}
+function frMap(){if(FR)return FR;FR={};SHOWS.forEach(s=>{(FR[frKey(s)]=FR[frKey(s)]||[]).push(s)});
+  Object.keys(FR).forEach(k=>FR[k].sort((a,b)=>seasonNo(a)-seasonNo(b)||a.ord-b.ord));return FR}
+/* keep the first card of each anime, drop its other seasons */
+function dedupe(list){const seen=new Set();return list.filter(s=>{const k=frKey(s);if(seen.has(k))return false;seen.add(k);return true})}
+function seasonPicker(base,mem){
+  const m=modal(h("b",{style:"font-size:18px"},base),h("div",{class:"muted",style:"font-size:13px"},mem.length+" seasons \u00b7 pick one"),
+    ...mem.map((x,i)=>h("button",{class:"sr",onclick:()=>{m.remove();go("#/show/"+x.slug)}},h("div",{class:"th"},posterEl(x)),h("div",{style:"min-width:0"},h("b",{},seasonLabel(x,i)),h("small",{},(x.n?x.n+" ep \u00b7 ":"")+subOf(x)))))
+    ,h("button",{class:"back",onclick:()=>m.remove()},"Close"))}
 const subOf=s=>((s.langs||[]).length?s.langs.slice(0,2).join(" · ")+" Dub":"Anime")+(s.movie?" · Movie":"");
 const ago=t=>{const d=Math.max(0,NOW-t);return d<3600?Math.max(1,Math.round(d/60))+"m ago":d<86400?Math.round(d/3600)+"h ago":Math.round(d/86400)+"d ago"};
 const epLink=s=>s.le?"#/watch/"+s.slug+"/"+s.le[0]+"/"+s.le[1]:"#/show/"+s.slug;
@@ -365,7 +382,7 @@ const bgStyle=s=>s.poster?"background-image:url('"+s.poster.replace(/'/g,"%27")+
 async function toggleFav(slug){if(!ME)return authModal();const on=!FAVS.includes(slug);try{await api("/api/fav",{slug,on});FAVS=on?[slug,...FAVS]:FAVS.filter(x=>x!==slug)}catch(e){}}
 
 /* ---------- home ---------- */
-function rail(title,list,more,mk){return list.length?[h("h2",{class:"sec"},title,more?h("button",{class:"see",onclick:more},"See all →"):null),h("div",{class:"rail"},list.map(mk||(s=>card(s))))]:[]}
+function rail(title,list,more,mk){if(!mk)list=dedupe(list);return list.length?[h("h2",{class:"sec"},title,more?h("button",{class:"see",onclick:more},"See all →"):null),h("div",{class:"rail"},list.map(mk||(s=>card(s))))]:[]}
 function heroDesc(s,resume,box){const d=s.d;if(!d)return null;
   const p=h("p",{class:"hd"},d),long=d.length>110;if(!long)return p;
   const b=h("button",{class:"hmore",onclick:e=>{e.stopPropagation();const o=p.classList.toggle("open");b.textContent=o?"Show less":"Show more";box.classList.toggle("hold",o);if(o)clearTimeout(heroTimer);else resume()}},"Show more");
@@ -380,7 +397,7 @@ function heroEl(items){
     box.replaceChildren(...[h("div",{class:"bg",style:bgStyle(s)}),art,
       N>1?h("div",{class:"seg"},items.map((_,k)=>h("button",{"aria-label":"Slide "+(k+1),class:k<i?"done":k===i?"on":"",onclick:()=>to(k)},h("i",{style:k===i?"animation-duration:"+D+"ms":""})))):null,
       h("div",{class:"hin"},
-      h("div",{class:"in2"},h("span",{class:"tag"},p?"Continue watching":nw&&s.le?"New episode · S"+s.le[0]+" E"+s.le[1]:"#"+(i+1)+" Trending"),(s.genres||[]).length?h("div",{class:"hg"},s.genres.slice(0,4).map(x=>h("span",{},x))):null,h("h1",{},s.name),heroDesc(s,()=>{clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(tick,D)},box),
+      h("div",{class:"in2"},h("span",{class:"tag"},p?"Continue watching":nw&&s.le?"New episode · S"+s.le[0]+" E"+s.le[1]:"#"+(i+1)+" Trending"),(s.genres||[]).length?h("div",{class:"hg"},s.genres.slice(0,8).map(x=>h("span",{},x))):null,h("h1",{},s.name),heroDesc(s,()=>{clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(tick,D)},box),
         h("div",{class:"meta"},((s.langs||[]).length?s.langs.slice(0,3).join(" · ")+" Dub":"Anime")+" • Free"),
         h("div",{class:"row2",style:"margin-top:12px"},h("button",{class:"pri",onclick:()=>go(p?resumeLink(s,p).slice(1):nw?epLink(s).slice(1):"#/show/"+s.slug)},p?"▶ Resume"+(s.movie?"":" S"+p.season+" E"+p.episode):"▶ Watch now"),h("button",{class:"glass",onclick:()=>go("#/show/"+s.slug)},"Details"))))].filter(Boolean));
     clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(tick,D)}
@@ -393,7 +410,7 @@ const A=s=>s.kind!=="cartoon";
 function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=term||filter!=="all"||lang!=="all"||genre!=="all";
   const langs=[...new Set(SHOWS.flatMap(s=>s.langs||[]))].sort();
   const genres=[...new Set(SHOWS.flatMap(s=>s.genres||[]))].sort();
-  const list=SHOWS.filter(s=>(filter==="all"||(filter==="movie"?s.movie:filter==="cartoon"?(!s.movie&&!A(s)):(!s.movie&&A(s))))&&(lang==="all"||(s.langs||[]).includes(lang))&&(genre==="all"||(s.genres||[]).includes(genre))&&(!term||s.name.toLowerCase().includes(term)));
+  const list=dedupe(SHOWS.filter(s=>(filter==="all"||(filter==="movie"?s.movie:filter==="cartoon"?(!s.movie&&!A(s)):(!s.movie&&A(s))))&&(lang==="all"||(s.langs||[]).includes(lang))&&(genre==="all"||(s.genres||[]).includes(genre))&&(!term||s.name.toLowerCase().includes(term))));
   const cont=PROG.map(p=>({p,s:bySlug(p.slug)})).filter(x=>x.s);
   const fresh=SHOWS.filter(s=>isNew(s)&&A(s)).sort((a,b)=>b.upd-a.upd);
   const recent=SHOWS.filter(s=>!s.movie&&A(s)&&s.poster&&!fresh.includes(s)).sort((a,b)=>b.ord-a.ord);
@@ -408,6 +425,9 @@ function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=t
     if(heroItems.length)kids.push(heroEl(heroItems));
     if(trendD.length>=4)kids.push(...rail("⚡ Trending today",trendD.slice(0,LITE?30:60)));
     if(trend.length>=4)kids.push(...rail("🚀 Trending this week",trend.slice(0,LITE?30:80)));
+    const gcnt={};SHOWS.forEach(x=>{if(A(x)&&x.poster)(x.genres||[]).forEach(g=>{gcnt[g]=(gcnt[g]||0)+1})});
+    const topG=Object.keys(gcnt).filter(g=>gcnt[g]>=3).sort((a,b)=>gcnt[b]-gcnt[a]).slice(0,8);
+    if(topG.length)kids.push(h("h2",{class:"sec"},"🎭 Genres"),h("div",{class:"chips"},topG.map(g=>h("button",{class:"chip",onclick:()=>{filter="all";lang="all";genre=g;shown=60;home()}},g))));
     kids.push(...rail("🔥 Latest episodes",fresh.slice(0,20),null,epCard));
     if(ME)kids.push(...rail("▶ Continue watching",cont.slice(0,15),null,({p,s})=>card(s,p.dur?Math.min(100,p.pos/p.dur*100):0,()=>go(resumeLink(s,p).slice(1)))));
     if(ME)kids.push(...rail("❤ My List",FAVS.map(bySlug).filter(Boolean).slice(0,20),()=>go("#/list")));
@@ -415,8 +435,8 @@ function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=t
     const pop=POP.map(bySlug).filter(Boolean);if(pop.length>=4)kids.push(...rail("⭐ Popular",pop));
     const top=SHOWS.filter(s=>s.rating>=7.5&&s.poster).sort((a,b)=>b.rating-a.rating).slice(0,20);if(top.length>=4)kids.push(...rail("🏆 Top rated",top));
     const gc={};SHOWS.forEach(s=>{if(A(s)&&s.poster)(s.genres||[]).forEach(g=>{gc[g]=(gc[g]||0)+1})});
-    Object.keys(gc).filter(g=>gc[g]>=6).sort((a,b)=>gc[b]-gc[a]).slice(0,LITE?6:12).forEach(g=>{
-      const l=SHOWS.filter(s=>A(s)&&s.poster&&(s.genres||[]).includes(g)).sort((a,b)=>(b.rating||0)-(a.rating||0)||b.ord-a.ord).slice(0,LITE?16:24);
+    Object.keys(gc).filter(g=>gc[g]>=3).sort((a,b)=>gc[b]-gc[a]).slice(0,8).forEach(g=>{
+      const l=SHOWS.filter(s=>A(s)&&s.poster&&(s.genres||[]).includes(g)).sort((a,b)=>(b.rating||0)-(a.rating||0)||b.ord-a.ord).slice(0,LITE?30:40);
       kids.push(...rail(g,l,()=>{filter="all";lang="all";genre=g;shown=60;home()}))});
     for(const L of ["Hindi","Tamil","Telugu"]){const l=SHOWS.filter(s=>(s.langs||[]).includes(L)&&!s.movie&&A(s)&&s.poster).sort((a,b)=>b.upd-a.upd||a.name.localeCompare(b.name)).slice(0,20);
       kids.push(...rail("🎌 "+L+" anime",l,()=>{lang=L;filter="anime";shown=60;home()}))}
@@ -455,9 +475,10 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
   const kids=[h("button",{class:"back",onclick:()=>history.length>1?history.back():go("#/")},"← Back"),
     h("div",{class:"top"},h("div",{class:"bg",style:bgStyle(s)}),h("div",{class:"detail"},posterEl(s),h("div",{class:"dtx"},h("h1",{},s.name),h("div",{class:"muted"},(s.rating?"★ "+(+s.rating).toFixed(1)+" · ":"")+(s.movie?"Movie":vids.length+" episodes")+((s.langs||[]).length?" · "+s.langs.join(", "):"")),
       h("div",{class:"row2",style:"margin-top:12px"},play,fav))))];
-  const inf=INFO[slug];if(inf&&(inf.d||(s.genres||inf.g||[]).length)){const gl=(s.genres&&s.genres.length?s.genres:inf.g)||[];kids.push(h("div",{style:"margin:14px 0 4px"},gl.length?h("div",{class:"chips"},gl.map(g=>h("span",{class:"tag",style:"background:var(--panel2);color:var(--text)"},g))):null,inf.d?h("p",{style:"margin:10px 0 0;line-height:1.55"},inf.d):null))}
-  if(sibs.length)kids.push(h("div",{class:"lbl",style:"margin-top:4px"},"Other seasons/parts"),
-    h("div",{class:"chips"},sibs.map(x=>h("button",{class:"chip",onclick:()=>go("#/show/"+x.slug)},x.name))));
+  const inf=INFO[slug]||{},gl=((s.genres&&s.genres.length?s.genres:inf.g)||[]).slice(0,8),mem=frMap()[frKey(s)]||[];
+  if(mem.length>1)kids.push(h("div",{class:"lbl",style:"margin-top:14px"},"Seasons"),
+    h("div",{class:"chips"},mem.map((x,k)=>h("button",{class:"chip","aria-pressed":String(x.slug===slug),onclick:()=>{if(x.slug!==slug)go("#/show/"+x.slug)}},seasonLabel(x,k)))));
+  if(gl.length||inf.d)kids.push(h("div",{style:"margin:14px 0 4px"},gl.length?h("div",{class:"chips"},gl.map(g=>h("span",{class:"tag",style:"background:var(--panel2);color:var(--text)"},g))):null,inf.d?h("p",{style:"margin:10px 0 0;line-height:1.55"},inf.d):null));
   if(!s.movie){const se={};vids.forEach(v=>(se[v.season]=se[v.season]||[]).push(v));
     for(const n of Object.keys(se).sort((a,b)=>a-b))kids.push(h("h2",{class:"sec"},"Season "+n),h("div",{class:"eps"},se[n].map(v=>h("button",{"data-k":v.season+":"+v.episode,class:"ep"+(last&&last.season==v.season&&last.episode==v.episode?" cur":""),title:v.title||"",onclick:()=>go("#/watch/"+slug+"/"+v.season+"/"+v.episode)},String(v.episode)))));
     if(!vids.length)kids.push(h("p",{class:"muted"},"No episodes found."))}

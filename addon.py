@@ -992,7 +992,8 @@ def _tmdb_lookup(name, is_movie, anime=True):
     mal_r = round(float(mal["score"]), 1) if mal and mal.get("score") else None
     rating, src = (mal_r, "mal") if mal_r else ((tm["r"], "tmdb") if tm["r"] else (None, ""))
     info = {"v": 3,
-            "g": G.normalize((mal or {}).get("genres"), tm["g"]) if mal
+            "g": (G.normalize(mal["genres"]) if len(G.normalize(mal["genres"])) >= 3
+                  else G.normalize(mal["genres"], tm["g"])) if mal
                  else G.normalize(tm["g"]),
             "d": tm["d"] or (mal or {}).get("synopsis", ""),
             "r": rating, "rs": src, "rt": tm["r"], "rm": mal_r,
@@ -1029,7 +1030,24 @@ def _tmdb_refresh(rec):
     return True
 
 
+_FIN_MEMO = {}
+
+
 def _show_info(rec, wait=0):
+    """_show_info_raw + genres cleaned/topped-up to 6-8 (genres.finalize)."""
+    info = _show_info_raw(rec, wait)
+    if not info:
+        return info
+    k = (rec["slug"], info.get("t"))
+    g = _FIN_MEMO.get(k)
+    if g is None:
+        g = _FIN_MEMO[k] = G.finalize(info.get("g"), info.get("d"), info.get("rs"))
+    out = dict(info)
+    out["g"] = g
+    return out
+
+
+def _show_info_raw(rec, wait=0):
     """Cached {"g","d","r","rs"} for a show.  On a miss starts a background TMDB
     lookup (optionally waits up to `wait` seconds for it)."""
     slug = rec["slug"]

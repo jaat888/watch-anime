@@ -23,13 +23,13 @@ import requests
 
 JIKAN_URL = "https://api.jikan.moe/v4"
 JIKAN_GAP = 1.1          # seconds between calls (Jikan limit: 3/s, 60/min)
-MAX_GENRES = 6
+MAX_GENRES = 8
 
 # source genre (lower-case) -> list of canonical genres.  [] means "drop".
 ALIASES = {
     # --- TMDB combined / odd names -------------------------------------
     "action & adventure": ["Action", "Adventure"],
-    "sci-fi & fantasy": ["Sci-Fi", "Fantasy"],
+    "sci-fi & fantasy": ["Fantasy"],        # TMDB lumps isekai/fantasy in here; real Sci-Fi comes from MAL/keywords
     "war & politics": ["War"],
     "science fiction": ["Sci-Fi"],
     "animation": [],                 # everything here is animation
@@ -66,7 +66,62 @@ THEMES = {
     "reincarnation": "Reincarnation", "idols (female)": "Idols",
     "idols (male)": "Idols", "anthropomorphic": "Anthropomorphic",
     "mythology": "Mythology", "gag humor": None, "harem": None,
+    "mahou shoujo": "Magical Girl", "team sports": "Sports", "combat sports": "Sports",
+    "racing": "Sports", "strategy game": "Strategy", "video game": "Game",
+    "high stakes game": "Game", "medical": "Medical", "workplace": "Workplace",
+    "delinquents": "Delinquents", "parody": "Parody", "pets": "Pets",
+    "iyashikei": "Healing", "organized crime": "Crime", "showbiz": "Showbiz",
+    "performing arts": "Performing Arts", "otaku culture": "Otaku", "childcare": "Family",
+    "love polygon": "Romance", "romantic subtext": "Romance", "adult cast": None,
+    "cgdct": None, "crossdressing": None, "gore": None, "reverse harem": None,
+    "visual arts": "Art", "educational": "Educational",
 }
+
+# Jikan demographics (Shounen, Seinen ...) are good browse tags too.
+DEMOS = {"shounen": "Shounen", "seinen": "Seinen", "shoujo": "Shoujo", "josei": "Josei"}
+
+# keyword -> genre, used on the synopsis to reach 6-8 accurate genres.
+KEYWORDS = [
+    (r"reincarnat", "Reincarnation"),
+    (r"reincarnat|another world|new world|isekai|summoned to|transported to", "Isekai"),
+    (r"\bmagic|wizard|sorcer|\bspells?\b|witch|mage\b", "Magic"),
+    (r"\bschool|academy|\bstudents?\b|classmate", "School"),
+    (r"romanc|romantic|falls? in love|fell in love|love interest|crush on", "Romance"),
+    (r"comed|hilarious|\bgags?\b|laugh|humou?r", "Comedy"),
+    (r"mystery|mysterious|detective|murder|investigat", "Mystery"),
+    (r"demon|ghost|spirit|\bcurse|supernatural|undead|monster|yokai", "Supernatural"),
+    (r"survival|survive", "Survival"),
+    (r"\barmy\b|soldier|military|\bwar\b|battlefield", "Military"),
+    (r"super ?powers?|special abilit|superhuman|superhero", "Super Power"),
+    (r"\bspace\b|galaxy|spaceship|alien|planet", "Space"),
+    (r"mecha|giant robot", "Mecha"),
+    (r"post-apocalyp|apocalypse|zombie", "Post-Apocalyptic"),
+    (r"adventure|journey|quest|explor", "Adventure"),
+    (r"fight|battle|combat|martial|swordsm|duel|warrior", "Action"),
+    (r"kingdom|\bking\b|\bprince|princess|knight|dragon|\belf\b|\belves\b|dungeon", "Fantasy"),
+    (r"family|friendship|\bfriends\b", "Drama"),
+    (r"cyber|android|\brobots?\b|artificial intelligence|futuristic|\bfuture\b", "Sci-Fi"),
+]
+_SCIFI_OK = re.compile(r"cyber|android|\brobots?\b|artificial intelligence|futur|\bspace|galaxy|alien|"
+                       r"planet|time travel|mecha|scientist|technolog|laborator|dystop|apocalyp", re.I)
+
+
+def finalize(genres, desc="", source=""):
+    """Clean + top up a stored genre list: drop a TMDB-only 'Sci-Fi' that the
+    synopsis does not support, then add keyword genres until there are
+    MAX_GENRES (never invents anything the text does not mention)."""
+    out = list(genres or [])
+    text = desc or ""
+    if source != "mal" and "Sci-Fi" in out and not _SCIFI_OK.search(text):
+        out.remove("Sci-Fi")
+    if len(out) < MAX_GENRES and text:
+        low = text.lower()
+        for pat, gname in KEYWORDS:
+            if len(out) >= MAX_GENRES:
+                break
+            if gname not in out and re.search(pat, low):
+                out.append(gname)
+    return out[:MAX_GENRES]
 
 
 def normalize(*name_lists, cap=MAX_GENRES):
@@ -155,6 +210,10 @@ def jikan_lookup(query, is_movie=False, min_match=0.6):
     raw = [g.get("name") for g in best.get("genres") or []]
     for t in best.get("themes") or []:
         mapped = THEMES.get((t.get("name") or "").lower())
+        if mapped:
+            raw.append(mapped)
+    for d in best.get("demographics") or []:
+        mapped = DEMOS.get((d.get("name") or "").lower())
         if mapped:
             raw.append(mapped)
     syn = re.sub(r"\s*\[Written by MAL Rewrite\]\s*", "",
