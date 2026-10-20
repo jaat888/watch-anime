@@ -13,6 +13,15 @@ var old=!Element.prototype.replaceChildren,low=navigator.deviceMemory&&navigator
 v=tv||old||low||mm("(prefers-reduced-motion:reduce)")}
 if(v)d.className+=" lite"})();
 </script>
+<script>
+/* TV mode = remote-control (D-pad) navigation + big focus rings. Auto on Android TV / smart TVs.
+   Force with ?tv=1 (on) or ?tv=0 (off); the choice is remembered. */
+(function(){var d=document.documentElement,ua=navigator.userAgent||"",t=null;
+try{var m=/[?&]tv=(\d)/.exec(location.search);if(m){t=m[1]==="1";localStorage.setItem("tv",t?"1":"0")}else{var s=localStorage.getItem("tv");if(s!==null)t=s==="1"}}catch(e){}
+if(t===null){var co=false;try{co=matchMedia("(pointer:coarse)").matches}catch(e){}
+t=/(\bTV\b|SMART-?TV|BRAVIA|\bAFT[A-Z0-9]*\b|SHIELD|MIBOX|MITV|Chromecast|CrKey|HbbTV|Tizen|Web0S|WebOS|NetCast|Roku|VIDAA|Hisense|GoogleTV|Fire ?TV)/i.test(ua)||(/Android/.test(ua)&&!/Mobile|Tablet|SM-T|Pad/i.test(ua)&&!co)}
+if(t)d.className+=" tv"})();
+</script>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0a0a0d">
 <title>mollad_jaat — Watch Anime</title>
@@ -228,6 +237,20 @@ html.lite .sk{background:var(--panel2)}
 .chips>*,.row2>*,.filters>*{margin:0 8px 8px 0}
 .dots i{margin-left:5px}
 @media(min-width:760px){.hero .art{right:32px;top:40px;bottom:32px;height:auto;max-height:calc(100% - 72px)}.rail{grid-auto-columns:280px;margin:0;padding-left:0;padding-right:0}.grid{grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}.hero{min-height:420px}.hero h1{font-size:40px}.hero .hin{padding:30px}}
+
+/* ---------- TV / remote control ---------- */
+html.tv a:focus,html.tv button:focus,html.tv select:focus,html.tv input:focus,html.tv [tabindex]:focus{outline:4px solid var(--accent);outline-offset:3px}
+html.tv .card:focus,html.tv .ep:focus,html.tv .sr:focus{transform:scale(1.04);z-index:3;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+html.tv .card:focus{border-color:var(--accent)}
+html.tv .rail{scroll-snap-type:none;padding-top:14px;padding-bottom:18px}
+html.tv video:focus{outline:none}
+html.tv .player:focus-within{outline:5px solid var(--accent);outline-offset:4px}
+html.tv .nav button:focus,html.tv .logo:focus{border-radius:12px}
+.tvosd{position:absolute;left:50%;top:14px;margin-left:-110px;min-width:220px;text-align:center;background:rgba(0,0,0,.8);color:#fff;padding:8px 18px;border-radius:999px;font-weight:700;font-size:16px;z-index:5;pointer-events:none;white-space:nowrap}
+.player:-webkit-full-screen{width:100%;height:100%;padding:0;border-radius:0}
+.player:fullscreen{width:100%;height:100%;padding:0;border-radius:0}
+.player:-webkit-full-screen video{width:100%;height:100%}
+.player:fullscreen video{width:100%;height:100%}
 </style>
 </head>
 <body>
@@ -572,6 +595,158 @@ function setHH(){const hd=document.querySelector("header"),nv=document.getElemen
 setHH();setTimeout(setHH,300);addEventListener("resize",setHH);addEventListener("orientationchange",setHH);addEventListener("load",setHH);
 meReady=loadMe().then(()=>{const p=location.hash.replace(/^#\/?/,"").split("/")[0];if(SHOWS&&p!=="watch")route()});
 route();
+</script>
+<script>
+/* ===== TV remote (D-pad) navigation. Plain ES5 so it runs on old Android TV Chrome. =====
+   Arrows = move focus (spatial) · OK = press · Back = close/back · on the video: ◀ ▶ seek, OK play/pause,
+   Menu/F = fullscreen, ▲▼ volume (fullscreen). Active in html.tv mode (auto on TVs, force with ?tv=1). */
+(function(){
+var root=document.documentElement;
+var SEL='a[href],button,input:not([type=hidden]),select,textarea,video,[tabindex]';
+var memo={},userMoved=false,lastContent=null,streak=0,streakDir=0,streakT=0,osdT=0,fsKey=0;
+function tvOn(){return root.className.indexOf("tv")>-1&&/(^|\s)tv(\s|$)/.test(root.className)}
+function enable(){if(!tvOn())root.className+=" tv"}
+function qsa(s,c){return Array.prototype.slice.call((c||document).querySelectorAll(s))}
+function matches(el,s){var f=el.matches||el.webkitMatchesSelector||el.msMatchesSelector;return f?f.call(el,s):false}
+function up(el,s){while(el&&el.nodeType===1){if(matches(el,s))return el;el=el.parentNode}return null}
+function fsEl(){return document.fullscreenElement||document.webkitFullscreenElement||null}
+function scope(){var m=qsa(".modal");if(m.length)return m[m.length-1];var s=document.querySelector(".so");if(s)return s;return fsEl()||document}
+function visible(el){var r=el.getBoundingClientRect();if(r.width<2||r.height<2)return false;var cs=getComputedStyle(el);return cs.visibility!=="hidden"&&cs.display!=="none"}
+function ok(el){if(el.disabled||el.getAttribute("tabindex")==="-1")return false;if(matches(el,".seg button"))return false;return visible(el)}
+function cands(sc){return qsa(SEL,sc).filter(ok)}
+function chrome(el){return up(el,"header,nav")}
+function txt(el){return((el.textContent||"")+"|"+(el.getAttribute("aria-label")||"")).replace(/\s+/g," ").trim().slice(0,80)}
+function key(){return location.hash||"#/"}
+
+/* make non-button clickable things reachable */
+function prep(){qsa(".logo,.rec .chip>span,.rec .chip>i,video").forEach(function(el){if(!el.hasAttribute("tabindex"))el.setAttribute("tabindex","0")});
+  qsa(".logo,.rec .chip>span,.rec .chip>i").forEach(function(el){if(!el.hasAttribute("role"))el.setAttribute("role","button")})}
+
+/* scroll the focused element into a comfortable spot (rails sideways, page up/down) */
+function reveal(el){var p=el.parentNode;
+  while(p&&p.nodeType===1&&p!==document.body&&p!==document.documentElement){
+    var cs=getComputedStyle(p),rp=null,r=null;
+    if(p.scrollWidth>p.clientWidth+2&&/(auto|scroll)/.test(cs.overflowX)){rp=p.getBoundingClientRect();r=el.getBoundingClientRect();
+      if(r.left<rp.left+20||r.right>rp.right-20)p.scrollLeft+=(r.left+r.right)/2-(rp.left+rp.right)/2}
+    if(p.scrollHeight>p.clientHeight+2&&/(auto|scroll)/.test(cs.overflowY)){rp=p.getBoundingClientRect();r=el.getBoundingClientRect();
+      if(r.top<rp.top+20||r.bottom>rp.bottom-20)p.scrollTop+=(r.top+r.bottom)/2-(rp.top+rp.bottom)/2}
+    p=p.parentNode}
+  if(chrome(el)||up(el,".modal,.so"))return;
+  var hd=document.querySelector("header"),nv=document.querySelector("nav"),top=hd?hd.offsetHeight:0,bot=innerHeight-(nv?nv.offsetHeight:0),r2=el.getBoundingClientRect();
+  if(r2.top<top+24||r2.bottom>bot-24)window.scrollBy(0,(r2.top+r2.bottom)/2-(top+bot)/2)}
+
+function focusEl(el,auto){if(!el)return;try{el.focus({preventScroll:true})}catch(e){el.focus()}reveal(el);
+  if(!auto){userMoved=true;memo[key()]={t:txt(el),c:el.className}}
+  if(!chrome(el)&&!up(el,".modal,.so"))lastContent=el}
+
+/* spatial search */
+function mid(a,b){return(a+b)/2}
+function score(dir,c,r){var prim,gap,cen;
+  if(dir==="left"||dir==="right"){
+    if(dir==="right"?!(r.left>=c.left+1&&mid(r.left,r.right)>mid(c.left,c.right)):!(r.right<=c.right-1&&mid(r.left,r.right)<mid(c.left,c.right)))return-1;
+    prim=dir==="right"?r.left-c.right:c.left-r.right;if(prim<0)prim=0;
+    gap=Math.max(0,Math.max(r.top,c.top)-Math.min(r.bottom,c.bottom));cen=Math.abs(mid(r.top,r.bottom)-mid(c.top,c.bottom))}
+  else{
+    if(dir==="down"?!(r.top>=c.top+1&&mid(r.top,r.bottom)>mid(c.top,c.bottom)):!(r.bottom<=c.bottom-1&&mid(r.top,r.bottom)<mid(c.top,c.bottom)))return-1;
+    prim=dir==="down"?r.top-c.bottom:c.top-r.bottom;if(prim<0)prim=0;
+    gap=Math.max(0,Math.max(r.left,c.left)-Math.min(r.right,c.right));cen=Math.abs(mid(r.left,r.right)-mid(c.left,c.right))}
+  return prim+gap*4+cen*.7}
+function best(dir,cur,list){var c=cur.getBoundingClientRect(),b=null,bs=1e12;
+  list.forEach(function(el){if(el===cur||el.contains(cur)||cur.contains(el))return;var s=score(dir,c,el.getBoundingClientRect());if(s>=0&&s<bs){bs=s;b=el}});return b}
+function find(dir,cur){var sc=scope(),all=cands(sc);
+  if(sc!==document){return best(dir,cur,all)}
+  var cc=chrome(cur),t0=[],t1=[],t2=[];
+  all.forEach(function(el){var ch=chrome(el);if(!ch)t1.push(el);else if(cc&&ch===cc)t0.push(el);else t2.push(el)});
+  var r=cc?best(dir,cur,t0):null;if(r)return r;
+  if(cc&&cc.tagName==="NAV"&&dir==="up"&&lastContent&&document.body.contains(lastContent)&&ok(lastContent))return lastContent;
+  r=best(dir,cur,t1);if(r)return r;
+  return best(dir,cur,t2)}
+
+/* initial / recovered focus */
+function pick(){var sc=scope(),all=cands(sc);if(!all.length)return null;
+  if(sc!==document){var inp=all.filter(function(e){return e.tagName==="INPUT"})[0];return inp||all[0]}
+  var body=all.filter(function(e){return!chrome(e)}),m=memo[key()];
+  if(m){var hit=body.filter(function(e){return txt(e)===m.t&&e.className===m.c})[0];if(hit)return hit}
+  var pr=[".player video","#app .hero .pri","#app .pri","#app .card"];
+  for(var i=0;i<pr.length;i++){var f=body.filter(function(e){return matches(e,pr[i])})[0];if(f)return f}
+  return body[0]||all[0]}
+function ensureFocus(){prep();var ae=document.activeElement,sc=scope();
+  if(sc!==document){if(!up(ae,".modal,.so")&&sc!==fsEl()){focusEl(pick(),true)}return}
+  var lost=!ae||ae===document.body||ae===root||!document.body.contains(ae);
+  if(lost||!userMoved){var p=pick();if(p&&p!==ae)focusEl(p,true)}}
+var obsT=0;
+function schedule(){if(!tvOn())return;clearTimeout(obsT);obsT=setTimeout(ensureFocus,70)}
+if(window.MutationObserver)new MutationObserver(schedule).observe(document.body,{childList:true,subtree:true});
+addEventListener("hashchange",function(){userMoved=false;qsa(".modal").forEach(function(m){m.click()});var c=document.querySelector(".so .socancel");if(c)c.click();schedule()});
+addEventListener("load",schedule);setTimeout(schedule,400);
+/* hold the hero carousel still while the remote is on it */
+document.addEventListener("focusin",function(e){var hr=up(e.target,".hero");if(hr&&tvOn())hr.className=hr.className.replace(/\bhold\b/,"")+" hold"});
+document.addEventListener("focusout",function(e){var hr=up(e.target,".hero");if(hr)hr.className=hr.className.replace(/\s*\bhold\b/,"")});
+
+/* video helpers */
+function osd(v,t){var p=up(v,".player")||v.parentNode,o=p.querySelector(".tvosd");if(!o){o=document.createElement("div");o.className="tvosd";p.appendChild(o)}
+  o.textContent=t;o.style.display="block";clearTimeout(osdT);osdT=setTimeout(function(){o.style.display="none"},1300)}
+function clock(s){s=Math.max(0,Math.floor(s||0));var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return(h?h+":"+(m<10?"0":""):"")+m+":"+(x<10?"0":"")+x}
+function seek(v,d){if(!v.duration||!isFinite(v.duration))return;v.currentTime=Math.max(0,Math.min(v.duration-1,v.currentTime+d));
+  osd(v,(d<0?"⏪ ":"⏩ ")+(d>0?"+":"")+d+"s · "+clock(v.currentTime)+" / "+clock(v.duration))}
+function toggle(v){if(v.paused){var p=v.play();if(p&&p.catch)p.catch(function(){});osd(v,"▶ Play · "+clock(v.currentTime))}else{v.pause();osd(v,"⏸ Pause · "+clock(v.currentTime))}}
+function fullscreen(v){var p=up(v,".player")||v;
+  if(fsEl()){(document.exitFullscreen||document.webkitExitFullscreen||function(){}).call(document)}
+  else{var f=p.requestFullscreen||p.webkitRequestFullscreen||p.mozRequestFullScreen||p.msRequestFullscreen;if(f)try{var r=f.call(p);if(r&&r.catch)r.catch(function(){})}catch(e){}}}
+function step(dir){var n=Date.now();streak=(dir===streakDir&&n-streakT<700)?streak+1:0;streakDir=dir;streakT=n;return[10,10,20,30,60,90][Math.min(streak,5)]}
+function goBack(){
+  var m=qsa(".modal");if(m.length){m[m.length-1].click();return true}
+  var so=document.querySelector(".so .socancel");if(so){so.click();return true}
+  if(fsEl()){(document.exitFullscreen||document.webkitExitFullscreen).call(document);return true}
+  var h=location.hash.replace(/^#\/?/,"");if(h){if(history.length>1)history.back();else location.hash="#/";return true}
+  return false}
+
+document.addEventListener("keydown",function(e){
+  var k=e.keyCode,ky=e.key||"";
+  if(k===4||k===23||k===10009||k===461||ky==="GoBack"||ky==="BrowserBack"||ky==="XF86Back")enable();
+  if(!tvOn()||e.ctrlKey||e.altKey||e.metaKey)return;
+  var ae=document.activeElement,tag=ae&&ae.tagName,type=(ae&&ae.type||"text").toLowerCase();
+  var isText=tag==="TEXTAREA"||(tag==="INPUT"&&/^(text|search|password|email|url|tel|number)$/.test(type));
+  var isVideo=tag==="VIDEO";
+  /* Back */
+  if(k===4||k===10009||k===461||ky==="GoBack"||ky==="BrowserBack"||ky==="XF86Back"||k===27||(k===8&&!isText)){if(goBack())e.preventDefault();return}
+  /* media keys */
+  var v=isVideo?ae:(document.querySelector(".player video"));
+  if(v&&(k===415||k===19||k===179||ky==="MediaPlayPause"||ky==="MediaPlay"||ky==="MediaPause")){e.preventDefault();if(k===415)v.paused&&toggle(v);else if(k===19)!v.paused&&toggle(v);else toggle(v);return}
+  if(v&&(k===412||ky==="MediaRewind")){e.preventDefault();seek(v,-30);return}
+  if(v&&(k===417||ky==="MediaFastForward")){e.preventDefault();seek(v,30);return}
+  if(v&&(k===228||k===176||ky==="MediaTrackNext")){var nx=document.querySelector(".nx");if(nx&&visible(nx)){e.preventDefault();nx.click()}return}
+  /* video focused */
+  if(isVideo){
+    if(k===13||k===23||k===32||ky==="Enter"){e.preventDefault();toggle(ae);return}
+    if(k===37||k===39){e.preventDefault();var s=step(k);seek(ae,k===37?-s:s);return}
+    if(k===70||k===82||k===93||k===457||ky==="ContextMenu"||ky==="Info"){e.preventDefault();fullscreen(ae);return}
+    if((k===38||k===40)&&fsEl()){e.preventDefault();ae.volume=Math.max(0,Math.min(1,ae.volume+(k===38?.1:-.1)));ae.muted=false;osd(ae,"🔊 "+Math.round(ae.volume*100)+"%");return}
+  }
+  /* press OK on things that do not react to Enter by themselves */
+  if(k===13||k===23||ky==="Enter"){
+    if(!ae||ae===document.body)return;
+    var native=tag==="BUTTON"||tag==="A"||tag==="SELECT"||(tag==="INPUT"&&!/^(checkbox|radio)$/.test(type))||tag==="TEXTAREA";
+    if(!native||k===23&&!isText){e.preventDefault();ae.click();userMoved=true}
+    return}
+  /* arrows */
+  var dir=k===37?"left":k===38?"up":k===39?"right":k===40?"down":ky==="ArrowLeft"?"left":ky==="ArrowUp"?"up":ky==="ArrowRight"?"right":ky==="ArrowDown"?"down":"";
+  if(!dir)return;
+  if(isText&&(dir==="left"||dir==="right")){var sS=null,sE=null;try{sS=ae.selectionStart;sE=ae.selectionEnd}catch(x){}
+    if(sS!==null&&(dir==="left"?sS>0:sE<(ae.value||"").length))return}
+  if(!ae||ae===document.body||ae===root||!document.body.contains(ae)){e.preventDefault();focusEl(pick());return}
+  var t=find(dir,ae);
+  if(t){e.preventDefault();focusEl(t);return}
+  /* edge of a hero slide -> change slide */
+  var hero=up(ae,".hero");
+  if(hero&&(dir==="left"||dir==="right")){var segs=qsa(".seg button",hero);
+    if(segs.length>1){var on=0;segs.forEach(function(b,i){if(/\bon\b/.test(b.className))on=i});e.preventDefault();segs[(on+(dir==="right"?1:segs.length-1))%segs.length].click();userMoved=false;return}}
+  if(dir==="left"||dir==="right"||isText||tag==="SELECT")e.preventDefault()
+},true);
+/* first sign of a remote-style device: arrow keys with no mouse/touch while it looks like a TV browser are handled above;
+   everything else (laptop) keeps normal behaviour unless ?tv=1 is used. */
+prep();
+})();
 </script>
 </body>
 </html>
