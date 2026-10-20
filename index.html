@@ -134,8 +134,8 @@ h2.sec{font-size:19px;font-weight:800;margin:26px 0 12px;display:flex;justify-co
 .muted{color:var(--dim)}.back{background:none;border:0;color:var(--dim);padding:0;margin:8px 0 12px;font-weight:600}
 
 /* detail */
-.top{position:relative;border-radius:22px;overflow:hidden;padding:0;margin-bottom:6px;background:var(--panel2);box-shadow:var(--shadow)}
-.top .bg{position:absolute;inset:-14px;background-size:cover;background-position:center;filter:blur(28px) brightness(.4)}
+.top{position:relative;border-radius:22px;overflow:hidden;padding:0;margin-bottom:6px;background:#0c0c11;box-shadow:var(--shadow)}
+.top .bg{position:absolute;top:-40px;right:-40px;bottom:-40px;left:-40px;background-size:cover;background-position:center;filter:blur(28px) brightness(.55) saturate(1.5)}
 .detail{position:relative;display:grid;grid-template-columns:1fr;gap:0;color:#fff}
 .detail .pw{border-radius:0}
 .detail .dtx{padding:16px 18px 20px}
@@ -226,7 +226,8 @@ html:not(.lite) .card .poster{transition:transform .5s cubic-bezier(.2,.7,.2,1)}
 html:not(.lite) .card:hover .poster{transform:scale(1.06)}
 html:not(.lite) .pri:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(255,83,48,.45)}}
 html.lite *,html.lite *::before,html.lite *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
-html.lite .hero .bg,html.lite .pw .bgb,html.lite .top .bg{filter:brightness(.55)!important}
+html.lite .hero .bg,html.lite .pw .bgb{filter:brightness(.55)!important}
+html.lite .top .bg{filter:brightness(.6) saturate(1.3)!important}
 html.lite .seg .on i{width:100%}
 html.lite .sk{background:var(--panel2)}
 @media(prefers-reduced-motion:reduce){.sk,.seg .on i,.hero .bg,.hero .art{animation:none}.seg .on i{width:100%}}
