@@ -45,7 +45,7 @@ h2.sec{font-size:17px;margin:24px 0 12px;display:flex;justify-content:space-betw
 .card:hover{border-color:var(--accent);transform:translateY(-2px)}
 .poster,.ph{aspect-ratio:2/3;width:100%;display:block;object-fit:cover;background:var(--panel2)}
 .ph{display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:800;color:var(--accent)}
-.t{padding:6px 10px 8px;font-size:12px;line-height:1.3;min-height:2.6em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.t{padding:6px 10px 8px;font-size:12px;line-height:1.3}
 .badge{position:absolute;top:8px;left:8px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-size:11px;font-weight:800;border-radius:8px;padding:2px 8px}
 .prog{height:4px;background:var(--line)}.prog i{display:block;height:100%;background:var(--accent)}
 .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;position:sticky;top:57px;z-index:4;background:var(--bg);padding:8px 0}
@@ -197,16 +197,21 @@ function listPage(){killPlayer();
     cont.length?h("div",{class:"grid"},cont.map(({p,s})=>card(s,p.dur?Math.min(100,p.pos/p.dur*100):0,()=>go(resumeLink(s,p).slice(1))))):h("p",{class:"muted"},"No watch history yet."))}
 
 /* ---------- show ---------- */
+const seasonBase=n=>(n||"").replace(/\s*[-:(]?\s*(?:season|part)\s*\d+\b.*$/i,"").trim().toLowerCase();
 async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go("#/");
   $app.replaceChildren(h("p",{class:"muted"},"Loading…"));
   await meReady;const vids=await getVids(s);
   const last=PROG.find(p=>p.slug===slug);
+  const base=seasonBase(s.name);
+  const sibs=base.length>2?SHOWS.filter(x=>x.slug!==slug&&seasonBase(x.name)===base).sort((a,b)=>a.name.localeCompare(b.name)):[];
   const fav=h("button",{class:"glass"},FAVS.includes(slug)?"✓ In My List":"+ Add to My List");
   fav.onclick=async()=>{await toggleFav(slug);fav.textContent=FAVS.includes(slug)?"✓ In My List":"+ Add to My List"};
   const play=s.movie?h("button",{class:"pri",onclick:()=>go("#/watch/"+slug)},"▶ Play"):(last?h("button",{class:"pri",onclick:()=>go("#/watch/"+slug+"/"+last.season+"/"+last.episode)},"▶ Continue S"+last.season+" E"+last.episode):vids[0]?h("button",{class:"pri",onclick:()=>go("#/watch/"+slug+"/"+vids[0].season+"/"+vids[0].episode)},"▶ Start watching"):null);
   const kids=[h("button",{class:"back",onclick:()=>history.length>1?history.back():go("#/")},"← Back"),
     h("div",{class:"top"},h("div",{class:"bg",style:bgStyle(s)}),h("div",{class:"detail"},posterEl(s),h("div",{},h("h1",{},s.name),h("div",{class:"muted"},(s.movie?"Movie":vids.length+" episodes")+((s.langs||[]).length?" · "+s.langs.join(", "):"")),
       h("div",{class:"row2",style:"margin-top:12px"},play,fav))))];
+  if(sibs.length)kids.push(h("div",{class:"lbl",style:"margin-top:4px"},"Other seasons/parts"),
+    h("div",{class:"chips"},sibs.map(x=>h("button",{class:"chip",onclick:()=>go("#/show/"+x.slug)},x.name))));
   if(!s.movie){const se={};vids.forEach(v=>(se[v.season]=se[v.season]||[]).push(v));
     for(const n of Object.keys(se).sort((a,b)=>a-b))kids.push(h("h2",{class:"sec"},"Season "+n),h("div",{class:"eps"},se[n].map(v=>h("button",{"data-k":v.season+":"+v.episode,class:"ep"+(last&&last.season==v.season&&last.episode==v.episode?" cur":""),title:v.title||"",onclick:()=>go("#/watch/"+slug+"/"+v.season+"/"+v.episode)},String(v.episode)))));
     if(!vids.length)kids.push(h("p",{class:"muted"},"No episodes found."))}
