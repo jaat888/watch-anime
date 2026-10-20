@@ -341,42 +341,51 @@ def main():
     if not seeds:
         print("[init] no local seed files found, fetching live seeds...", flush=True)
         import xml.etree.ElementTree as ET
+
+        def local_tag(el):
+            """Strip the {namespace} prefix ElementTree adds to tag names,
+            so we match <loc> regardless of which xmlns the sitemap
+            declares (or doesn't)."""
+            t = el.tag
+            return t.rsplit("}", 1)[-1] if "}" in t else t
+
+        def crawl_sitemap(url, seen, depth=0):
+            """Recursively walk a sitemap / sitemap-index, namespace-agnostic.
+            Returns the set of content URLs found under `url`."""
+            found = set()
+            if depth > 3 or url in seen:
+                return found
+            seen.add(url)
+            html, final = fetch(url)
+            if not html:
+                print(f"[init] {url} -> FAILED (final_url={final})", flush=True)
+                return found
+            try:
+                root = ET.fromstring(html.encode("utf-8"))
+            except ET.ParseError as e:
+                print(f"[init] {url} -> XML parse error: {e}", flush=True)
+                return found
+            locs = [el.text.strip() for el in root.iter()
+                    if local_tag(el) == "loc" and el.text and el.text.strip()]
+            print(f"[init] {url} -> {len(locs)} <loc> entries", flush=True)
+            for loc in locs:
+                if loc.endswith(".xml") and loc not in seen:
+                    found |= crawl_sitemap(loc, seen, depth + 1)
+                elif is_content(loc):
+                    found.add(canon(loc))
+            return found
+
+        seen_sitemaps = set()
         for sitemap_url in (
             f"https://{HOST}/sitemap_index.xml",
             f"https://{HOST}/sitemap.xml",
             f"https://{HOST}/post-sitemap.xml",
         ):
-            html, final = fetch(sitemap_url)
-            if not html:
-                print(f"[init] {sitemap_url} -> FAILED (final_url={final})",
-                      flush=True)
-                continue
-            try:
-                root = ET.fromstring(html)
-            except ET.ParseError:
-                continue
-            found_here = 0
-            for u in root.iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc"):
-                loc = (u.text or "").strip()
-                if not loc:
-                    continue
-                if loc.endswith(".xml"):
-                    # sitemap index -> fetch the child sitemap too
-                    sub_html, _ = fetch(loc)
-                    if sub_html:
-                        try:
-                            sub_root = ET.fromstring(sub_html)
-                            for su in sub_root.iter(
-                                "{http://www.sitemaps.org/schemas/sitemap/0.9}loc"):
-                                if is_content(su.text):
-                                    seeds.add(canon(su.text))
-                                    found_here += 1
-                        except ET.ParseError:
-                            pass
-                elif is_content(loc):
-                    seeds.add(canon(loc))
-                    found_here += 1
-            print(f"[init] {sitemap_url} -> {found_here} urls", flush=True)
+            seeds |= crawl_sitemap(sitemap_url, seen_sitemaps)
+            if seeds:
+                break
+        print(f"[init] sitemap crawl -> {len(seeds)} seed urls", flush=True)
+
         if not seeds:
             # last resort: crawl the homepage and follow whatever it links to
             html, final = fetch(f"https://{HOST}/")
