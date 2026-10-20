@@ -320,6 +320,53 @@ def main():
         if p.exists():
             seeds |= internal_links(p.read_text(encoding="utf-8", errors="replace"))
 
+    # Fallback: no local sitemap.xml / naruto_s1.html checked into the repo
+    # (fresh clone / CI runner) -> fetch the live sitemap(s) and homepage
+    # instead, so the crawl always has somewhere to start from.
+    if not seeds:
+        print("[init] no local seed files found, fetching live seeds...", flush=True)
+        import xml.etree.ElementTree as ET
+        for sitemap_url in (
+            f"https://{HOST}/sitemap_index.xml",
+            f"https://{HOST}/sitemap.xml",
+            f"https://{HOST}/post-sitemap.xml",
+        ):
+            html, _ = fetch(sitemap_url)
+            if not html:
+                continue
+            try:
+                root = ET.fromstring(html)
+            except ET.ParseError:
+                continue
+            found_here = 0
+            for u in root.iter("{http://www.sitemaps.org/schemas/sitemap/0.9}loc"):
+                loc = (u.text or "").strip()
+                if not loc:
+                    continue
+                if loc.endswith(".xml"):
+                    # sitemap index -> fetch the child sitemap too
+                    sub_html, _ = fetch(loc)
+                    if sub_html:
+                        try:
+                            sub_root = ET.fromstring(sub_html)
+                            for su in sub_root.iter(
+                                "{http://www.sitemaps.org/schemas/sitemap/0.9}loc"):
+                                if is_content(su.text):
+                                    seeds.add(canon(su.text))
+                                    found_here += 1
+                        except ET.ParseError:
+                            pass
+                elif is_content(loc):
+                    seeds.add(canon(loc))
+                    found_here += 1
+            print(f"[init] {sitemap_url} -> {found_here} urls", flush=True)
+        if not seeds:
+            # last resort: crawl the homepage and follow whatever it links to
+            html, _ = fetch(f"https://{HOST}/")
+            if html:
+                seeds |= internal_links(html)
+            print(f"[init] homepage fallback -> {len(seeds)} urls", flush=True)
+
     # resume: re-seed queue from links of already-crawled pages is unnecessary;
     # anything linked from done pages was already enqueued in a prior run or
     # will be re-discovered via cross-links. Start with seeds + state store set.
@@ -366,7 +413,8 @@ def main():
     save_state()
 
     # ---------- merge ----------
-    hubs = [json.loads(l) for l in HUB_JSONL.read_text().splitlines() if l.strip()]
+    hub_text = HUB_JSONL.read_text() if HUB_JSONL.exists() else ""
+    hubs = [json.loads(l) for l in hub_text.splitlines() if l.strip()]
     by_key = {}
     for r in hubs:
         k = strong(r["url"])
@@ -374,7 +422,8 @@ def main():
             by_key[k] = r
     hubs = sorted(by_key.values(), key=lambda r: r["url"])
 
-    eps = [json.loads(l) for l in EP_JSONL.read_text().splitlines() if l.strip()]
+    ep_text = EP_JSONL.read_text() if EP_JSONL.exists() else ""
+    eps = [json.loads(l) for l in ep_text.splitlines() if l.strip()]
     seen, eps2 = set(), []
     for e in eps:
         if e["stream"] not in seen:
