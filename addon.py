@@ -1743,6 +1743,14 @@ def _latest_ep(rec):
     return list(max(ks)) if ks else None
 
 
+def _short_desc(t, n=320):
+    """Description trimmed to ~n chars on a word boundary (for hero/previews)."""
+    t = re.sub(r"\s+", " ", t or "").strip()
+    if len(t) <= n:
+        return t
+    return t[:n].rsplit(" ", 1)[0].rstrip(" ,;:-") + "…"
+
+
 def api_shows():
     """Compact list for the website grid (name, slug, poster, movie?)."""
     with STORE_LOCK:
@@ -1751,6 +1759,7 @@ def api_shows():
                   "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i,
                   "le": _latest_ep(r), "genres": _show_genres(r),
                   "rating": _show_info(r).get("r"),
+                  "d": _short_desc(_show_info(r).get("d")),
                   "n": sum(1 for k in r["eps"] if k[0])}
                  for i, r in enumerate(SHOWS.values())]
     upd = _updates()

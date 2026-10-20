@@ -73,6 +73,12 @@ html{scroll-padding-bottom:calc(var(--nh,70px) + 16px)}
 .hero .hin{position:relative;z-index:1;padding:18px 18px 20px;color:#fff;width:100%}
 .hero .in2{min-width:0;max-width:620px}
 .hero h1{margin:8px 0 4px;font-size:28px;line-height:1.08;font-weight:900;font-style:italic;letter-spacing:-.5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 2px 14px rgba(0,0,0,.5)}
+.hero .hg{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}
+.hero .hg span{font-size:11px;font-weight:700;color:#fff;background:rgba(255,255,255,.18);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:1px solid rgba(255,255,255,.22);border-radius:999px;padding:4px 10px;line-height:1}
+.hero .hd{margin:8px 0 0;font-size:13px;line-height:1.45;color:#eceef5;font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 1px 8px rgba(0,0,0,.5)}
+.hero .hd.open{-webkit-line-clamp:unset;display:block;overflow:visible}
+.hero .hmore{background:none;border:0;color:#fff;font-weight:800;font-size:12.5px;padding:4px 0 0;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.hero.hold .seg .on i{animation-play-state:paused}
 .hero .meta{font-size:13px;color:#e4e6ee;font-weight:500}
 .hero .pri,.hero .glass{padding:11px 22px;font-size:15px}
 .hero .pri{flex:1 1 0;max-width:220px}.hero .glass{flex:1 1 0;max-width:180px}
@@ -305,6 +311,10 @@ async function toggleFav(slug){if(!ME)return authModal();const on=!FAVS.includes
 
 /* ---------- home ---------- */
 function rail(title,list,more,mk){return list.length?[h("h2",{class:"sec"},title,more?h("button",{class:"see",onclick:more},"See all →"):null),h("div",{class:"rail"},list.map(mk||(s=>card(s))))]:[]}
+function heroDesc(s,resume,box){const d=s.d;if(!d)return null;
+  const p=h("p",{class:"hd"},d),long=d.length>110;if(!long)return p;
+  const b=h("button",{class:"hmore",onclick:e=>{e.stopPropagation();const o=p.classList.toggle("open");b.textContent=o?"Show less":"Show more";box.classList.toggle("hold",o);if(o)clearTimeout(heroTimer);else resume()}},"Show more");
+  return h("div",{},p,b)}
 function heroEl(items){
   const box=h("div",{class:"hero"}),D=6000,N=items.length;let i=0,sx=0,sy=0;
   const to=k=>{clearTimeout(heroTimer);i=(k+N)%N;draw()};
@@ -315,7 +325,7 @@ function heroEl(items){
     box.replaceChildren(...[h("div",{class:"bg",style:bgStyle(s)}),art,
       N>1?h("div",{class:"seg"},items.map((_,k)=>h("button",{"aria-label":"Slide "+(k+1),class:k<i?"done":k===i?"on":"",onclick:()=>to(k)},h("i",{style:k===i?"animation-duration:"+D+"ms":""})))):null,
       h("div",{class:"hin"},
-      h("div",{class:"in2"},h("span",{class:"tag"},p?"Continue watching":nw&&s.le?"New episode · S"+s.le[0]+" E"+s.le[1]:"#"+(i+1)+" Trending"),h("h1",{},s.name),
+      h("div",{class:"in2"},h("span",{class:"tag"},p?"Continue watching":nw&&s.le?"New episode · S"+s.le[0]+" E"+s.le[1]:"#"+(i+1)+" Trending"),(s.genres||[]).length?h("div",{class:"hg"},s.genres.slice(0,4).map(x=>h("span",{},x))):null,h("h1",{},s.name),heroDesc(s,()=>{clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(()=>to(i+1),D)},box),
         h("div",{class:"meta"},((s.langs||[]).length?s.langs.slice(0,3).join(" · ")+" Dub":"Anime")+" • Free"),
         h("div",{class:"row2",style:"margin-top:12px"},h("button",{class:"pri",onclick:()=>go(p?resumeLink(s,p).slice(1):nw?epLink(s).slice(1):"#/show/"+s.slug)},p?"▶ Resume"+(s.movie?"":" S"+p.season+" E"+p.episode):"▶ Watch now"),h("button",{class:"glass",onclick:()=>go("#/show/"+s.slug)},"Details"))))].filter(Boolean));
     clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(()=>to(i+1),D)}
@@ -348,6 +358,10 @@ function home(){killPlayer();const term=$q.value.trim().toLowerCase(),browsing=t
     kids.push(...rail("👀 Recently added",recent.slice(0,20),null,epCard));
     const pop=POP.map(bySlug).filter(Boolean);if(pop.length>=4)kids.push(...rail("⭐ Popular",pop));
     const top=SHOWS.filter(s=>s.rating>=7.5&&s.poster).sort((a,b)=>b.rating-a.rating).slice(0,20);if(top.length>=4)kids.push(...rail("🏆 Top rated",top));
+    const gc={};SHOWS.forEach(s=>{if(A(s)&&s.poster)(s.genres||[]).forEach(g=>{gc[g]=(gc[g]||0)+1})});
+    Object.keys(gc).filter(g=>gc[g]>=6).sort((a,b)=>gc[b]-gc[a]).slice(0,12).forEach(g=>{
+      const l=SHOWS.filter(s=>A(s)&&s.poster&&(s.genres||[]).includes(g)).sort((a,b)=>(b.rating||0)-(a.rating||0)||b.ord-a.ord).slice(0,24);
+      kids.push(...rail(g,l,()=>{filter="all";lang="all";genre=g;shown=60;home()}))});
     for(const L of ["Hindi","Tamil","Telugu"]){const l=SHOWS.filter(s=>(s.langs||[]).includes(L)&&!s.movie&&A(s)&&s.poster).sort((a,b)=>b.upd-a.upd||a.name.localeCompare(b.name)).slice(0,20);
       kids.push(...rail("🎌 "+L+" anime",l,()=>{lang=L;filter="anime";shown=60;home()}))}
     kids.push(...rail("🧸 Cartoons",SHOWS.filter(s=>!s.movie&&!A(s)&&s.poster).sort((a,b)=>b.ord-a.ord).slice(0,20),()=>{filter="cartoon";lang="all";shown=60;home()}));
