@@ -158,7 +158,8 @@ def fetch(url, referer=None):
             else:
                 r = s.get(url, headers=headers, timeout=TIMEOUT)
             final = str(r.url)
-            if r.status_code == 200 and "html" in r.headers.get("content-type", ""):
+            ctype = r.headers.get("content-type", "")
+            if r.status_code == 200 and ("html" in ctype or "xml" in ctype):
                 time.sleep(DELAY + random.random() * 0.15)
                 return r.text, final
             if r.status_code in (429, 503):
