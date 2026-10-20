@@ -1708,7 +1708,8 @@ def api_shows():
         items = [{"slug": r["slug"], "name": r["name"],
                   "poster": r.get("poster") or "", "movie": bool(r["movie"]),
                   "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i,
-                  "le": _latest_ep(r), "genres": _show_genres(r)}
+                  "le": _latest_ep(r), "genres": _show_genres(r),
+                  "n": sum(1 for k in r["eps"] if k[0])}
                  for i, r in enumerate(SHOWS.values())]
     upd = _updates()
     for it in items:
