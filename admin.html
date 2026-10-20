@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin Panel</title>
+<style>
+  :root{--bg:#0f1115;--card:#181b22;--line:#2a2f3a;--tx:#e8eaf0;--mut:#8b93a5;--acc:#6c8cff;--red:#ff5d6c;--grn:#3ecf8e}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,sans-serif}
+  .wrap{max-width:900px;margin:0 auto;padding:16px}
+  h1{font-size:20px;margin:8px 0 16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+  input{background:#0f1115;border:1px solid var(--line);color:var(--tx);border-radius:8px;padding:10px 12px;font-size:15px;width:100%}
+  button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;cursor:pointer}
+  button.red{background:var(--red)} button.ghost{background:transparent;border:1px solid var(--line);color:var(--tx)}
+  .row{display:flex;gap:8px;align-items:center}
+  .msg{margin-top:10px;font-size:14px;min-height:20px}.err{color:var(--red)}.ok{color:var(--grn)}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);font-size:14px}
+  th{color:var(--mut);font-weight:500}
+  .tw{overflow-x:auto}
+  .stat{font-size:28px;font-weight:600}.mut{color:var(--mut);font-size:13px}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Admin Panel</h1>
+
+  <div id="login" class="card">
+    <div class="mut" style="margin-bottom:8px">Enter your ADMIN_KEY</div>
+    <div class="row">
+      <input id="key" type="password" placeholder="Admin key" autocomplete="off">
+      <button id="go">Login</button>
+    </div>
+    <div id="lmsg" class="msg"></div>
+  </div>
+
+  <div id="panel" class="hide">
+    <div class="card row" style="justify-content:space-between">
+      <div><div class="mut">Total users</div><div class="stat" id="total">0</div></div>
+      <div class="row">
+        <button class="ghost" id="refresh">Refresh</button>
+        <button class="ghost" id="logout">Logout</button>
+      </div>
+    </div>
+    <div class="card">
+      <input id="search" placeholder="Search username...">
+      <div id="msg" class="msg"></div>
+      <div class="tw"><table>
+        <thead><tr><th>Username</th><th>Joined</th><th>Last seen</th><th>History</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let KEY = "", USERS = [];
+try { KEY = sessionStorage.getItem("ak") || ""; } catch(e) {}
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body ? "POST" : "POST",
+    headers: {"X-Admin-Key": KEY, "Content-Type": "application/json"},
+    body: JSON.stringify(body || {})
+  });
+  let j = {};
+  try { j = await r.json(); } catch(e) {}
+  if (!r.ok) throw new Error(j.error || ("Error " + r.status));
+  return j;
+}
+function fmt(t) {
+  if (!t) return "-";
+  t = Number(t); if (t < 1e12) t *= 1000;
+  return new Date(t).toLocaleString();
+}
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function say(el, t, cls) { el.textContent = t; el.className = "msg " + (cls || ""); }
+
+function render() {
+  const f = $("search").value.trim().toLowerCase();
+  const list = USERS.filter(u => u.username.toLowerCase().includes(f));
+  $("rows").innerHTML = list.map(u => `<tr>
+    <td>${esc(u.username)}</td><td>${fmt(u.created)}</td><td>${fmt(u.last_seen)}</td><td>${u.history}</td>
+    <td class="row"><button class="ghost" data-a="pw" data-u="${esc(u.username)}">Password</button>
+    <button class="red" data-a="del" data-u="${esc(u.username)}">Delete</button></td></tr>`).join("")
+    || `<tr><td colspan="5" class="mut">No users</td></tr>`;
+}
+async function load() {
+  const j = await api("/api/admin/stats");
+  USERS = j.users; $("total").textContent = j.total; render();
+}
+async function login() {
+  KEY = $("key").value.trim() || KEY;
+  try {
+    await load();
+    try { sessionStorage.setItem("ak", KEY); } catch(e) {}
+    $("login").classList.add("hide"); $("panel").classList.remove("hide");
+  } catch(e) { say($("lmsg"), e.message, "err"); }
+}
+$("go").onclick = login;
+$("key").onkeydown = e => { if (e.key === "Enter") login(); };
+$("search").oninput = render;
+$("refresh").onclick = () => load().then(() => say($("msg"), "Refreshed", "ok")).catch(e => say($("msg"), e.message, "err"));
+$("logout").onclick = () => { try { sessionStorage.removeItem("ak"); } catch(e) {} location.reload(); };
+$("rows").onclick = async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const u = b.dataset.u;
+  try {
+    if (b.dataset.a === "pw") {
+      const p = prompt("New password for " + u + " (min 6 characters):");
+      if (!p) return;
+      await api("/api/admin/password", {username: u, password: p});
+      say($("msg"), "Password changed for " + u + " (user logged out everywhere)", "ok");
+    } else {
+      if (!confirm("Delete user " + u + "? This cannot be undone.")) return;
+      await api("/api/admin/delete", {username: u});
+      say($("msg"), u + " deleted", "ok"); await load();
+    }
+  } catch(err) { say($("msg"), err.message, "err"); }
+};
+if (KEY) { $("key").value = KEY; login(); }
+</script>
+</body>
+</html>
