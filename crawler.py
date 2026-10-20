@@ -24,11 +24,6 @@ from urllib.parse import unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
-try:
-    from curl_cffi import requests as creq
-    HAVE_CURL_CFFI = True
-except ImportError:
-    HAVE_CURL_CFFI = False
 
 ROOT = Path(__file__).parent
 OUT_JSON = ROOT / "streams.json"
@@ -152,26 +147,16 @@ def fetch(url, referer=None):
     final = None
     for attempt in range(4):
         try:
-            if HAVE_CURL_CFFI:
-                r = creq.get(url, headers=headers, timeout=TIMEOUT,
-                             allow_redirects=True, impersonate="chrome")
-            else:
-                r = s.get(url, headers=headers, timeout=TIMEOUT)
+            r = s.get(url, headers=headers, timeout=TIMEOUT)
             final = str(r.url)
-            ctype = r.headers.get("content-type", "")
-            if r.status_code == 200 and ("html" in ctype or "xml" in ctype):
+            if r.status_code == 200 and "html" in r.headers.get("content-type", ""):
                 time.sleep(DELAY + random.random() * 0.15)
                 return r.text, final
             if r.status_code in (429, 503):
                 time.sleep(5 * (attempt + 1))
                 continue
-            print(f"[fetch] {url} -> status={r.status_code} "
-                  f"content-type={r.headers.get('content-type')!r} "
-                  f"body[:200]={r.text[:200]!r}", flush=True)
             return None, final
-        except requests.RequestException as e:
-            print(f"[fetch] {url} -> exception attempt {attempt}: {repr(e)}",
-                  flush=True)
+        except requests.RequestException:
             time.sleep(2 * (attempt + 1))
     with lock:
         errors.append({"url": url, "error": "failed after retries"})
@@ -335,67 +320,6 @@ def main():
         if p.exists():
             seeds |= internal_links(p.read_text(encoding="utf-8", errors="replace"))
 
-    # Fallback: no local sitemap.xml / naruto_s1.html checked into the repo
-    # (fresh clone / CI runner) -> fetch the live sitemap(s) and homepage
-    # instead, so the crawl always has somewhere to start from.
-    if not seeds:
-        print("[init] no local seed files found, fetching live seeds...", flush=True)
-        import xml.etree.ElementTree as ET
-
-        def local_tag(el):
-            """Strip the {namespace} prefix ElementTree adds to tag names,
-            so we match <loc> regardless of which xmlns the sitemap
-            declares (or doesn't)."""
-            t = el.tag
-            return t.rsplit("}", 1)[-1] if "}" in t else t
-
-        def crawl_sitemap(url, seen, depth=0):
-            """Recursively walk a sitemap / sitemap-index, namespace-agnostic.
-            Returns the set of content URLs found under `url`."""
-            found = set()
-            if depth > 3 or url in seen:
-                return found
-            seen.add(url)
-            html, final = fetch(url)
-            if not html:
-                print(f"[init] {url} -> FAILED (final_url={final})", flush=True)
-                return found
-            try:
-                root = ET.fromstring(html.encode("utf-8"))
-            except ET.ParseError as e:
-                print(f"[init] {url} -> XML parse error: {e}", flush=True)
-                return found
-            locs = [el.text.strip() for el in root.iter()
-                    if local_tag(el) == "loc" and el.text and el.text.strip()]
-            print(f"[init] {url} -> {len(locs)} <loc> entries", flush=True)
-            for loc in locs:
-                if loc.endswith(".xml") and loc not in seen:
-                    found |= crawl_sitemap(loc, seen, depth + 1)
-                elif is_content(loc):
-                    found.add(canon(loc))
-            return found
-
-        seen_sitemaps = set()
-        for sitemap_url in (
-            f"https://{HOST}/sitemap_index.xml",
-            f"https://{HOST}/sitemap.xml",
-            f"https://{HOST}/post-sitemap.xml",
-        ):
-            seeds |= crawl_sitemap(sitemap_url, seen_sitemaps)
-            if seeds:
-                break
-        print(f"[init] sitemap crawl -> {len(seeds)} seed urls", flush=True)
-
-        if not seeds:
-            # last resort: crawl the homepage and follow whatever it links to
-            html, final = fetch(f"https://{HOST}/")
-            if html:
-                seeds |= internal_links(html)
-            else:
-                print(f"[init] homepage fetch FAILED (final_url={final})",
-                      flush=True)
-            print(f"[init] homepage fallback -> {len(seeds)} urls", flush=True)
-
     # resume: re-seed queue from links of already-crawled pages is unnecessary;
     # anything linked from done pages was already enqueued in a prior run or
     # will be re-discovered via cross-links. Start with seeds + state store set.
@@ -442,8 +366,7 @@ def main():
     save_state()
 
     # ---------- merge ----------
-    hub_text = HUB_JSONL.read_text() if HUB_JSONL.exists() else ""
-    hubs = [json.loads(l) for l in hub_text.splitlines() if l.strip()]
+    hubs = [json.loads(l) for l in HUB_JSONL.read_text().splitlines() if l.strip()]
     by_key = {}
     for r in hubs:
         k = strong(r["url"])
@@ -451,8 +374,7 @@ def main():
             by_key[k] = r
     hubs = sorted(by_key.values(), key=lambda r: r["url"])
 
-    ep_text = EP_JSONL.read_text() if EP_JSONL.exists() else ""
-    eps = [json.loads(l) for l in ep_text.splitlines() if l.strip()]
+    eps = [json.loads(l) for l in EP_JSONL.read_text().splitlines() if l.strip()]
     seen, eps2 = set(), []
     for e in eps:
         if e["stream"] not in seen:
