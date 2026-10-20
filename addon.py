@@ -177,6 +177,7 @@ def _tmdb_load_cache():
 
 def _tmdb_store(slug, info):
     """Save one successful lookup (memory + SQL).  Never called on failure."""
+    info = dict(info, g=G.finalize(info.get("g"), info.get("d"), info.get("rs")), gf=1)
     with _tmdb_lock:
         _TMDB_CACHE[slug] = info
     try:
@@ -186,6 +187,29 @@ def _tmdb_store(slug, info):
 
 
 _tmdb_load_cache()
+
+
+def _migrate_genres():
+    """One-time, in the background: clean + top up (6-8) the genres of every
+    already-saved show and store them back, so it is never recomputed."""
+    n = 0
+    for slug, info in list(_TMDB_CACHE.items()):
+        if not isinstance(info, dict) or info.get("gf"):
+            continue
+        try:
+            new = dict(info, g=G.finalize(info.get("g"), info.get("d"), info.get("rs")), gf=1)
+            with _tmdb_lock:
+                _TMDB_CACHE[slug] = new
+            accounts.tmdb_set(slug, new)
+            n += 1
+        except Exception as e:
+            print(f"[rt2] genre migrate failed for {slug}: {repr(e)}", flush=True)
+        time.sleep(0.005)
+    if n:
+        print(f"[rt2] genres saved for {n} shows", flush=True)
+
+
+threading.Thread(target=_migrate_genres, daemon=True).start()
 
 
 def _build_shows():
