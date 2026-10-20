@@ -24,6 +24,11 @@ from urllib.parse import unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+try:
+    from curl_cffi import requests as creq
+    HAVE_CURL_CFFI = True
+except ImportError:
+    HAVE_CURL_CFFI = False
 
 ROOT = Path(__file__).parent
 OUT_JSON = ROOT / "streams.json"
@@ -147,7 +152,11 @@ def fetch(url, referer=None):
     final = None
     for attempt in range(4):
         try:
-            r = s.get(url, headers=headers, timeout=TIMEOUT)
+            if HAVE_CURL_CFFI:
+                r = creq.get(url, headers=headers, timeout=TIMEOUT,
+                             allow_redirects=True, impersonate="chrome")
+            else:
+                r = s.get(url, headers=headers, timeout=TIMEOUT)
             final = str(r.url)
             if r.status_code == 200 and "html" in r.headers.get("content-type", ""):
                 time.sleep(DELAY + random.random() * 0.15)
