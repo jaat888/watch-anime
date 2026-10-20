@@ -895,7 +895,8 @@ def _tmdb_genre_map(kind):
     try:
         j = _tmdb_get(f"/genre/{kind}/list")
         m = {g["id"]: g["name"] for g in j.get("genres", [])}
-    except Exception:
+    except Exception as e:
+        print(f"[rt2] tmdb genre_map FAILED: {repr(e)}", flush=True)
         m = {}
     _TMDB_GENRE_MAP[kind] = m
     return m
@@ -913,7 +914,8 @@ def _tmdb_lookup_genres(name, is_movie):
         gm = _tmdb_genre_map(kind)
         ids = results[0].get("genre_ids") or []
         return [gm[i] for i in ids if i in gm]
-    except Exception:
+    except Exception as e:
+        print(f"[rt2] tmdb lookup FAILED for '{name}': {repr(e)}", flush=True)
         return []
 
 

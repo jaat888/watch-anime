@@ -155,8 +155,13 @@ def fetch(url, referer=None):
             if r.status_code in (429, 503):
                 time.sleep(5 * (attempt + 1))
                 continue
+            print(f"[fetch] {url} -> status={r.status_code} "
+                  f"content-type={r.headers.get('content-type')!r} "
+                  f"body[:200]={r.text[:200]!r}", flush=True)
             return None, final
-        except requests.RequestException:
+        except requests.RequestException as e:
+            print(f"[fetch] {url} -> exception attempt {attempt}: {repr(e)}",
+                  flush=True)
             time.sleep(2 * (attempt + 1))
     with lock:
         errors.append({"url": url, "error": "failed after retries"})
@@ -331,8 +336,10 @@ def main():
             f"https://{HOST}/sitemap.xml",
             f"https://{HOST}/post-sitemap.xml",
         ):
-            html, _ = fetch(sitemap_url)
+            html, final = fetch(sitemap_url)
             if not html:
+                print(f"[init] {sitemap_url} -> FAILED (final_url={final})",
+                      flush=True)
                 continue
             try:
                 root = ET.fromstring(html)
@@ -362,9 +369,12 @@ def main():
             print(f"[init] {sitemap_url} -> {found_here} urls", flush=True)
         if not seeds:
             # last resort: crawl the homepage and follow whatever it links to
-            html, _ = fetch(f"https://{HOST}/")
+            html, final = fetch(f"https://{HOST}/")
             if html:
                 seeds |= internal_links(html)
+            else:
+                print(f"[init] homepage fetch FAILED (final_url={final})",
+                      flush=True)
             print(f"[init] homepage fallback -> {len(seeds)} urls", flush=True)
 
     # resume: re-seed queue from links of already-crawled pages is unnecessary;
