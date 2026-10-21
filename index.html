@@ -268,7 +268,7 @@ html.tv .nav button:focus,html.tv .logo:focus{border-radius:12px}
 <script>
 /* old TV Chrome (< 86) cannot run hls.js 1.x reliably -> use the legacy 0.14 build there */
 (function(){var old=!Element.prototype.replaceChildren;window.OLD_BROWSER=old;
-document.write('<scr'+'ipt src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/'+(old?'0.14.17':'1.5.13')+'/hls.min.js"></scr'+'ipt>')})();
+document.write('<scr'+'ipt crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/'+(old?'0.14.17':'1.5.13')+'/hls.min.js"></scr'+'ipt>')})();
 </script>
 <script>
 /* polyfills for old browsers (TV Chrome < 86) */
@@ -288,9 +288,9 @@ def(Array.prototype,"includes",function(v){return this.indexOf(v)>-1});
 if(!Object.entries)Object.entries=function(o){return Object.keys(o).map(function(k){return[k,o[k]]})};
 if(!window.Promise||!window.fetch){document.title="Browser too old"}
 /* show any script error on screen so it is easy to debug on a TV */
-function showErr(t){var m=document.querySelector(".player .msg");if(m){m.style.display="flex";m.textContent=t}}
+function showErr(t){var a=document.getElementById("app");if(a&&!a.firstChild){var p=document.createElement("p");p.style.cssText="padding:16px;color:#c00;font:14px monospace";p.textContent=t;a.appendChild(p)}else{console.error(t)}}
 window.addEventListener("unhandledrejection",function(e){showErr("Error: "+((e.reason&&e.reason.message)||e.reason))});
-window.addEventListener("error",function(e){showErr("Error: "+e.message+" (line "+e.lineno+")");var a=document.getElementById("app");if(a&&!a.firstChild){var p=document.createElement("p");p.style.cssText="padding:16px;color:#c00;font:14px monospace";p.textContent="Error: "+e.message+" (line "+e.lineno+")";a.appendChild(p)}});
+window.addEventListener("error",function(e){showErr("Error: "+e.message+" (line "+e.lineno+")")});
 })();
 </script>
 <script>
