@@ -49,6 +49,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -82,6 +83,11 @@ WN_TTL          = _env_int("WN_TTL", 6 * 3600)     # WN signed link (~8h life)
 WN_STALE        = _env_int("WN_STALE", 6 * 3600)   # max stale-serve age, WN
 CINE_TTL        = _env_int("CINE_TTL", 6 * 3600)   # Cinemeta title cache
 TMDB_TTL        = _env_int("TMDB_TTL", 7 * 24 * 3600)  # genre lookup cache
+LIST_WAIT       = float(os.environ.get("LIST_WAIT") or 1.5)   # card listing waits at most this long (s)
+OPTIMISTIC      = os.environ.get("OPTIMISTIC_CARDS", "1") != "0"  # show cards before resolve finishes
+_LW             = LIST_WAIT if OPTIMISTIC else LIST_BUDGET
+SHOWS_TTL       = _env_int("SHOWS_TTL", 45)        # /api/shows payload cache
+PL_TTL          = _env_int("PL_TTL", 300)          # HLS playlist cache (VOD)
 
 VERSION  = "3.4.5"
 ADDON_ID = "community.raretoons2"
@@ -392,6 +398,33 @@ def _zipper_walk(zipper, deadline):
     return text, None
 
 
+_walk_locks = {}
+_walk_locks_g = threading.Lock()
+
+
+def _walk_lock_for(z):
+    with _walk_locks_g:
+        l = _walk_locks.get(z)
+        if l is None:
+            l = _walk_locks[z] = threading.Lock()
+        return l
+
+
+def _optimistic_zipper(zippers):
+    """First candidate that is not known-dead: lets a card show instantly;
+    the real resolve happens at play time (and is already warming)."""
+    now = time.time()
+    for z in zippers[:3]:
+        if not z.startswith("https://codedew.com/"):
+            continue
+        with _hls_lock:
+            h = _hls_cache.get(z)
+        if h and not h[1] and h[0] > now:
+            continue                       # inside negative window: dead
+        return z
+    return None
+
+
 def _mq_resolve(zipper, stale_ok=False):
     """zipper -> (master_m3u8_url, embed_url).  Wall -> argon iframe ->
     embed page -> juicy blob -> JWPlayer config.
@@ -414,6 +447,18 @@ def _mq_resolve(zipper, stale_ok=False):
             return master, embed
         if not master and exp > now:
             return None, None                    # inside negative window
+    # ONE walk per zipper at a time: the card resolver and the player used
+    # to walk the same zipper in parallel (double work, semaphore starved)
+    with _walk_lock_for(zipper):
+        with _hls_lock:
+            hit2 = _hls_cache.get(zipper)
+        if hit2 and hit2 is not hit and hit2[0] > time.time():
+            return hit2[1], hit2[2]            # another thread just finished
+        return _mq_walk(zipper, hit)
+
+
+def _mq_walk(zipper, hit):
+    now = time.time()
     embed = master = None
     deadline = time.monotonic() + WALK_BUDGET
     try:
@@ -562,20 +607,17 @@ def _wn_resolve(zipper, stale_ok=False):
     return None, None
 
 
-def _resolve_wn(cands, budget=LIST_BUDGET):
-    """{lang: [watchnow-zippers]} -> {lang: (direct_url, kind, zipper)},
-    parallel.  R2 (fsl) pages win; google (10g) is the fallback so WN
-    shows for series and movies in every language the site carries."""
+def _resolve_wn(cands, budget=LIST_BUDGET, wait=None):
+    """{lang: [(watchnow-zipper, qn)]} -> {lang: (direct_url, kind, zipper, qn)}.
+    R2 (fsl) pages win; google (10g) is the fallback."""
     out = {}
     if not cands:
         return out
     deadline = time.monotonic() + budget
+    jd = time.monotonic() + (budget if wait is None else wait)
     lock = threading.Lock()
 
     def _run(lang, zippers):
-        # R2 (fsl) preferred - full range seeking; google (10g) fallback
-        # (plays fine, seeks best-effort) so every language that has a
-        # WatchNow button gets its card, series and movies alike.
         fb = None
         for z, qn in zippers[:3]:
             if time.monotonic() > deadline:
@@ -598,8 +640,9 @@ def _resolve_wn(cands, budget=LIST_BUDGET):
     for t in threads:
         t.start()
     for t in threads:
-        t.join(max(0.1, deadline - time.monotonic()) + 0.5)
-    return out
+        t.join(max(0.02, jd - time.monotonic()))
+    with lock:
+        return dict(out)
 
 # --------------------------------------------------------- live freshness --
 _EP_POS_RE = re.compile(r"Episode\s*0*(\d{1,3})", re.I)
@@ -807,14 +850,15 @@ def _absorb_live(rec, live_rows, season=None):
                                     if o.get("lang") not in langs]
 
 
-def _resolve_picks(picks, done=None, budget=LIST_BUDGET):
-    """{lang: [zippers]} -> {lang: (master, zipper)}.  One thread per
-    language (wall-walks are I/O bound), up to 3 zippers per language,
-    inside one shared time budget."""
+def _resolve_picks(picks, done=None, budget=LIST_BUDGET, wait=None):
+    """{lang: [zippers]} -> {lang: (master, zipper, quality)}.  One thread
+    per language, up to 3 zippers each.  `wait` = how long THIS call blocks
+    (threads keep running and fill the caches afterwards)."""
     out = {}
     if not picks:
         return out
     deadline = time.monotonic() + budget
+    jd = time.monotonic() + (budget if wait is None else wait)
     lock = threading.Lock()
 
     def _run(lang, zippers):
@@ -827,9 +871,6 @@ def _resolve_picks(picks, done=None, budget=LIST_BUDGET):
                 return
             master, _ = _mq_resolve(z, stale_ok=True)
             if master:
-                # spare budget -> highest variant resolution for the
-                # card label; the join waits for the same deadline
-                # anyway, so this can never delay the listing
                 q = (_master_quality(master)
                      if time.monotonic() < deadline - 1 else "")
                 with lock:
@@ -841,8 +882,9 @@ def _resolve_picks(picks, done=None, budget=LIST_BUDGET):
     for t in threads:
         t.start()
     for t in threads:
-        t.join(max(0.1, deadline - time.monotonic()) + 0.5)
-    return out
+        t.join(max(0.02, jd - time.monotonic()))
+    with lock:
+        return dict(out)
 
 # ------------------------------------------------------------------ meta ---
 _CINEMETA = "https://v3-cinemeta.strem.io/meta/{t}/{id}.json"
@@ -1617,14 +1659,14 @@ def handle_stream(mtype, mid):
         return wc
 
     def _pools(rows_, picks_, wc_):
-        dl = time.monotonic() + LIST_BUDGET
+        dl = time.monotonic() + _LW + 0.5
         box = {"wn": {}}
         ts = [threading.Thread(
-            target=lambda b=box: b.update(mq=_resolve_picks(picks_)),
+            target=lambda b=box: b.update(mq=_resolve_picks(picks_, wait=_LW)),
             daemon=True)]
         if wc_:
             ts.append(threading.Thread(
-                target=lambda b=box: b.update(wn=_resolve_wn(wc_)),
+                target=lambda b=box: b.update(wn=_resolve_wn(wc_, wait=_LW)),
                 daemon=True))
         for t in ts:
             t.start()
@@ -1653,7 +1695,7 @@ def handle_stream(mtype, mid):
             picks = _picks(rows)
             wn_cands = _wn_pool(rows)
             resolved, wn_resolved = _pools(rows, picks, wn_cands)
-    elif not resolved or (wn_cands and not wn_resolved):
+    elif not OPTIMISTIC and (not resolved or (wn_cands and not wn_resolved)):
         # resolution came up EMPTY (a rotated zipper): the user must
         # never see zero cards on the first tap -> ONE synchronous live
         # refresh + retry before serving whatever we have.
@@ -1670,19 +1712,21 @@ def handle_stream(mtype, mid):
             wn_cands = _wn_pool(rows)
             resolved, wn_resolved = _pools(rows, picks, wn_cands)
     if len(resolved) < len(picks) or (wn_cands and not wn_resolved):
-        # partial resolve (a language/zipper failed): SERVE what we have
-        # now - the user waits no extra second - and finish the missing
-        # pieces in the background so the next request is complete.
+        # served what we have NOW; finish the rest in the background
         def _fin(rec=rec, season=season, episode=episode):
-            with _live_lock:
-                _live_cache.pop(rec.get("hub"), None)
-            live = _live_rows(rec)
-            if live:
-                _absorb_live(rec, live, season)
             fr = _rows_for(rec, season, episode)
             fp = _picks(fr)
-            if fp:
-                _resolve_picks(fp)
+            got = _resolve_picks(fp) if fp else {}     # joins walks in flight
+            if len(got) < len(fp):                     # zipper may have rotated
+                with _live_lock:
+                    _live_cache.pop(rec.get("hub"), None)
+                live = _live_rows(rec)
+                if live:
+                    _absorb_live(rec, live, season)
+                    fr = _rows_for(rec, season, episode)
+                    fp = _picks(fr)
+                    if fp:
+                        _resolve_picks(fp)
             wc = _wn_pool(fr)
             if wc:
                 _resolve_wn(wc)
@@ -1710,7 +1754,10 @@ def handle_stream(mtype, mid):
     for lang in picks:                     # LANG_ORDER iteration order
         hit = resolved.get(lang)
         if not hit:
-            continue                       # PLAYABLE-ONLY: no card at all
+            z0 = _optimistic_zipper(picks[lang]) if OPTIMISTIC else None
+            if not z0:
+                continue                   # known-dead / nothing to try
+            hit = (None, z0, "")           # resolves at play time
         master, z, mq_q = hit
         note = ""
         if dub_show and lang.lower() == "hindi sub" and not has_dub:
@@ -1795,12 +1842,12 @@ def _short_desc(t, n=320):
     return t[:n].rsplit(" ", 1)[0].rstrip(" ,;:-") + "…"
 
 
-def api_shows():
+def _api_shows_build():
     """Compact list for the website grid (name, slug, poster, movie?)."""
     items = []
     with STORE_LOCK:
         for i, r in enumerate(SHOWS.values()):
-            info = _show_info(r)          # one lookup per show
+            info = _show_info_cached(r)   # cache-only: no thread per show
             items.append({"slug": r["slug"], "name": r["name"],
                           "poster": r.get("poster") or "", "movie": bool(r["movie"]),
                           "langs": _show_langs(r), "kind": _kind(r["name"]), "ord": i,
@@ -1818,28 +1865,189 @@ def api_shows():
             "trending_day": _trending("day")}
 
 
+def _show_info_cached(rec):
+    """Cache-only read for the list endpoint.  The old _show_info() spawned
+    a background TMDB lookup thread for EVERY stale show on every request;
+    the backfill thread already keeps those fresh."""
+    slug = rec["slug"]
+    info = _TMDB_CACHE.get(slug)
+    if not info:
+        return {}
+    k = (slug, info.get("t"))
+    g = _FIN_MEMO.get(k)
+    if g is None:
+        g = _FIN_MEMO[k] = G.finalize(info.get("g"), info.get("d"), info.get("rs"))
+    out = dict(info)
+    out["g"] = g
+    return out
+
+
+_shows_cache = {"t": 0, "raw": None, "gz": None}
+_shows_lock = threading.Lock()
+
+
+def _shows_rebuild():
+    raw = json.dumps(_api_shows_build(), ensure_ascii=False).encode("utf-8")
+    _shows_cache.update(raw=raw, gz=gzip.compress(raw, 6), t=time.time())
+
+
+def index_page():
+    """index.html with the show list already INSIDE it (window.__BOOT__), so
+    the cards render on first paint instead of after a second request."""
+    path = os.path.join(BASE_DIR, "index.html")
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return None, None
+    try:
+        raw_json, _ = shows_payload()
+    except Exception:
+        raw_json = None
+    key = (_shows_cache["t"], mt)
+    c = _page_cache
+    if c["key"] == key and c["raw"]:
+        return c["raw"], c["gz"]
+    with open(path, "rb") as fh:
+        html = fh.read().decode("utf-8")
+    if raw_json:
+        boot = (raw_json.decode("utf-8").replace("<", "\\u003c")
+                .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+        i = html.find("const LITE=")
+        j = html.rfind("<script", 0, i) if i > 0 else -1
+        if j > 0:
+            html = html[:j] + "<script>window.__BOOT__=" + boot + ";</script>\n" + html[j:]
+    raw = html.encode("utf-8")
+    c.update(key=key, raw=raw, gz=gzip.compress(raw, 6))
+    return c["raw"], c["gz"]
+
+
+def shows_payload():
+    """(raw_json, gzipped_json).  Built once, served from memory, refreshed
+    in the background after SHOWS_TTL - requests never wait for a rebuild."""
+    c = _shows_cache
+    if c["raw"] is None:
+        with _shows_lock:                  # first build: one builder, rest wait
+            if c["raw"] is None:
+                _shows_rebuild()
+    elif time.time() - c["t"] > SHOWS_TTL:
+        _bg_once(("shows",), _shows_rebuild)
+    return c["raw"], c["gz"]
+
+
 _img_cache = {}
+_page_cache = {"key": None, "raw": None, "gz": None}
+
+
+IMG_DIR = os.environ.get("IMG_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "rt_img")
+try:
+    os.makedirs(IMG_DIR, exist_ok=True)
+except OSError:
+    pass
+
+
+def _img_path(token):
+    return os.path.join(IMG_DIR, hashlib.sha1(token.encode()).hexdigest())
+
+
+def _img_mem(token, hit):
+    if len(_img_cache) > 300:
+        _img_cache.pop(next(iter(_img_cache)), None)
+    _img_cache[token] = hit
+
+
+def _img_load(token, url):
+    """memory -> disk -> upstream.  Returns (bytes, content_type) or None.
+    Posters used to be re-fetched from the source site (TLS handshake +
+    Cloudflare) every time the 400-entry memory cache rolled over - that
+    was the 'card is there but the picture comes late' delay."""
+    hit = _img_cache.get(token)
+    if hit:
+        return hit
+    pth = _img_path(token)
+    try:
+        with open(pth, "rb") as fh:
+            ct, _, body = fh.read().partition(b"\n")
+        if body:
+            hit = (body, ct.decode() or "image/jpeg")
+            _img_mem(token, hit)
+            return hit
+    except OSError:
+        pass
+    with _walk_lock_for("img:" + token):          # one upstream fetch per image
+        hit = _img_cache.get(token)
+        if hit:
+            return hit
+        r = upstream_get(url, referer=SITE, timeout=15)
+        ctype = r.headers.get("content-type") or ""
+        if r.status_code != 200 or "image" not in ctype:
+            return None
+        hit = (r.content, ctype)
+        try:
+            tmp = pth + ".tmp%d" % threading.get_ident()
+            with open(tmp, "wb") as fh:
+                fh.write(ctype.encode() + b"\n" + r.content)
+            os.replace(tmp, pth)
+        except OSError:
+            pass
+        _img_mem(token, hit)
+        return hit
 
 
 def _serve_img(handler, token, url=None):
     url = url or _unseal(token)
     if not url.startswith("https://"):
         return handler._send({"error": "bad image"}, 400)
-    hit = _img_cache.get(token)
+    hit = _img_load(token, url)
     if not hit:
-        r = upstream_get(url, referer=SITE, timeout=15)
-        if r.status_code != 200 or "image" not in (r.headers.get("content-type") or ""):
-            return handler._send({"error": "no image"}, 404)
-        hit = (r.content, r.headers.get("content-type"))
-        if len(_img_cache) > 400:
-            _img_cache.pop(next(iter(_img_cache)))
-        _img_cache[token] = hit
+        return handler._send({"error": "no image"}, 404)
     handler.send_response(200)
     handler.send_header("Content-Type", hit[1])
     handler.send_header("Content-Length", str(len(hit[0])))
-    handler.send_header("Cache-Control", "public, max-age=604800")
+    handler.send_header("Cache-Control", "public, max-age=604800, immutable")
     handler.end_headers()
-    handler.wfile.write(hit[0])
+    if not handler._is_head:
+        handler.wfile.write(hit[0])
+
+
+def _img_prewarm():
+    """Background: pull every poster to disk once (visible-first), so a
+    visitor never waits on the source site for a picture."""
+    time.sleep(8)
+    while True:
+        try:
+            order, seen = [], set()
+            upd = _updates()
+            lists = (_trending("week"), _trending("day"), _popular(),
+                     sorted(SHOWS, key=lambda k: -upd.get(k, 0)), list(SHOWS))
+            for lst in lists:
+                for slug in lst:
+                    if slug not in seen and slug in SHOWS:
+                        seen.add(slug)
+                        order.append(slug)
+            q = [sl for sl in order
+                 if (SHOWS[sl].get("poster") or "").startswith("https://")
+                 and not os.path.exists(_img_path("s:" + sl))]
+            lock = threading.Lock()
+
+            def _worker():
+                while True:
+                    with lock:
+                        if not q:
+                            return
+                        sl = q.pop(0)
+                    try:
+                        _img_load("s:" + sl, SHOWS[sl]["poster"])
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+            ws = [threading.Thread(target=_worker, daemon=True) for _ in range(3)]
+            for w in ws:
+                w.start()
+            for w in ws:
+                w.join()
+        except Exception as e:
+            print("[rt2] img prewarm:", repr(e), flush=True)
+        time.sleep(3600)
 
 
 _pop_cache = {"t": 0, "data": []}
@@ -2112,6 +2320,7 @@ def _pump(handler, response, length=None, skip=0):
             continue
         if first:
             if chunk.lstrip()[:4] in _HTML_HEADS:
+                handler.close_connection = True
                 return False
             first = False
         if skip:
@@ -2125,13 +2334,75 @@ def _pump(handler, response, length=None, skip=0):
         written += len(chunk)
         if length is not None and written >= length:
             break
+    if length is not None and written < length:
+        handler.close_connection = True      # short body: never reuse socket
     return True
+
+
+_pl_cache = {}
+_pl_lock = threading.Lock()
+
+
+def _pl_cached(url):
+    with _pl_lock:
+        h = _pl_cache.get(url)
+    return h[1] if h and h[0] > time.time() else None
+
+
+def _pl_put(url, text):
+    if not text:
+        return
+    with _pl_lock:
+        if len(_pl_cache) > 300:
+            for k in list(_pl_cache)[:100]:
+                _pl_cache.pop(k, None)
+        _pl_cache[url] = (time.time() + PL_TTL, text)
+
+
+def _pl_fetch(url, timeout=20):
+    """(status, text) - VOD playlists are static, so a hit skips a whole
+    upstream round trip (every quality switch / seek reload used one)."""
+    t = _pl_cached(url)
+    if t is not None:
+        return 200, t
+    r = upstream_get(url, referer=ARGON, timeout=timeout)
+    if r.status_code == 200:
+        _pl_put(url, r.text or "")
+    return r.status_code, (r.text or "")
+
+
+def _warm_variants(master, text):
+    """Pre-fetch the variant playlists in the background: the player asks
+    for one of them right after the master."""
+    for ln in (text or "").splitlines():
+        ln = ln.strip()
+        if ln and not ln.startswith("#") and ".m3u8" in ln.lower():
+            u = urljoin(master, ln)
+            if _pl_cached(u) is None:
+                _bg_once(("pl", u), lambda u=u: _pl_fetch(u))
+
+
+def _finish_master(handler, zipper, master, text):
+    hs = [int(h) for h in _MASTER_RES_RE.findall(text or "")]
+    if hs:
+        with _hls_lock:
+            _mqres_cache[master] = (time.time() + 6 * 3600, f"{max(hs)}p")
+    body = _rewrite_m3u8(text or "", master, f"/mq/{_mq_token(zipper)}").encode()
+    _warm_variants(master, text or "")
+    handler._send_raw(body, CONTENT_TYPES[".m3u8"])
 
 
 def _serve_m3u8_master(handler, zipper):
     master, _ = _mq_resolve(zipper)
     if not master:
         handler._send({"error": "MQ stream unavailable - try again"}, 502)
+        return
+    cached = _pl_cached(master)
+    if cached is not None:
+        try:
+            _finish_master(handler, zipper, master, cached)
+        except Exception as exc:
+            handler._send({"error": f"master: {exc}"}, 502)
         return
     try:
         # the site's video host (groovy) sometimes hangs at connect
@@ -2157,14 +2428,8 @@ def _serve_m3u8_master(handler, zipper):
             if r.status_code != 200:
                 handler._send({"error": f"master {r.status_code}"}, 502)
                 return
-        hs = [int(h) for h in _MASTER_RES_RE.findall(r.text or "")]
-        if hs:
-            with _hls_lock:
-                _mqres_cache[master] = (time.time() + 6 * 3600,
-                                        f"{max(hs)}p")
-        body = _rewrite_m3u8(r.text or "", master,
-                             f"/mq/{_mq_token(zipper)}").encode()
-        handler._send_raw(body, CONTENT_TYPES[".m3u8"])
+        _pl_put(master, r.text or "")
+        _finish_master(handler, zipper, master, r.text or "")
     except Exception as exc:
         handler._send({"error": f"master: {exc}"}, 502)
 
@@ -2186,11 +2451,11 @@ def _serve_m3u8_child(handler, zipper, b64url, ext, rt=""):
     try:
         # Variant/media playlists must be REWRITTEN too; media streams.
         if ext == ".m3u8":
-            r = upstream_get(target, referer=ARGON, timeout=20)
-            if r.status_code != 200:
-                handler._send({"error": f"playlist {r.status_code}"}, 502)
+            code_, txt_ = _pl_fetch(target)
+            if code_ != 200:
+                handler._send({"error": f"playlist {code_}"}, 502)
                 return
-            body = _rewrite_m3u8(r.text or "", target, proxy_prefix).encode()
+            body = _rewrite_m3u8(txt_, target, proxy_prefix).encode()
             handler._send_raw(body, CONTENT_TYPES[".m3u8"])
             return
 
@@ -2221,7 +2486,8 @@ def _serve_m3u8_child(handler, zipper, b64url, ext, rt=""):
                                 "Content-Length, Content-Range, "
                                 "Accept-Ranges")
             handler.send_header("Cache-Control", "private, max-age=3600")
-            handler.send_header("Connection", "close")
+            if not cl:      # only an unknown length needs close; else keep-alive
+                handler.send_header("Connection", "close")
             handler.end_headers()
 
         # normalizer: the client's requested slice is ALWAYS what goes
@@ -2259,7 +2525,8 @@ def _serve_m3u8_child(handler, zipper, b64url, ext, rt=""):
             handler.send_header("Access-Control-Expose-Headers",
                                 "Content-Length, Accept-Ranges")
             handler.send_header("Cache-Control", "private, max-age=3600")
-            handler.send_header("Connection", "close")
+            if not total:
+                handler.send_header("Connection", "close")
             handler.end_headers()
             if not handler._is_head:
                 _pump(handler, up)
@@ -2271,6 +2538,7 @@ def _serve_m3u8_child(handler, zipper, b64url, ext, rt=""):
     except (BrokenPipeError, ConnectionResetError):
         pass
     except Exception as exc:
+        handler.close_connection = True
         try:
             handler._send({"error": f"child: {exc}"}, 502)
         except Exception:
@@ -2518,6 +2786,8 @@ _admin_fails = {}
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "RareToons2"
+    timeout = 75            # idle keep-alive sockets are dropped, not leaked
+    disable_nagle_algorithm = True   # headers+body in separate sends cost ~40 ms each otherwise
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[rt2] " + (fmt % args) + "\n")
@@ -2651,12 +2921,23 @@ class Handler(BaseHTTPRequestHandler):
         _public_base_holder["base"] = public_base_from(self)
         try:
             if path.rstrip("/") in ("", "/"):
-                try:
-                    with open(os.path.join(BASE_DIR, "index.html"), "rb") as fh:
-                        self._send_raw(fh.read(), "text/html; charset=utf-8")
-                except FileNotFoundError:
+                raw, gz = index_page()
+                if raw is None:
                     self._send({"addon": ADDON_NAME, "version": VERSION,
                                 "status": "ok"})
+                    return
+                use_gz = "gzip" in (self.headers.get("Accept-Encoding") or "")
+                body = gz if use_gz else raw
+                self.send_response(200)
+                if use_gz:
+                    self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                if not self._is_head:
+                    self.wfile.write(body)
                 return
             if path == "/status":
                 self._send({"addon": ADDON_NAME, "version": VERSION,
@@ -2693,7 +2974,20 @@ class Handler(BaseHTTPRequestHandler):
                 u = accounts.user_for(self._token())
                 return self._send({"seen": accounts.get_seen(u["id"], m.group(1)) if u else []})
             if path == "/api/shows":
-                self._send(api_shows())
+                raw, gz = shows_payload()
+                use_gz = "gzip" in (self.headers.get("Accept-Encoding") or "")
+                body = gz if use_gz else raw
+                self.send_response(200)
+                if use_gz:
+                    self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                if not self._is_head:
+                    self.wfile.write(body)
                 return
             m = re.match(r"^/api/watch/([a-z0-9_]+)(?:/(\d+)/(\d+))?$", path)
             if m:
@@ -2965,6 +3259,8 @@ def main():
     threading.Thread(target=_catalog_refresh, daemon=True).start()
     threading.Thread(target=_fresh_watch, daemon=True).start()
     threading.Thread(target=_tmdb_backfill, daemon=True).start()
+    threading.Thread(target=shows_payload, daemon=True).start()   # warm /api/shows
+    threading.Thread(target=_img_prewarm, daemon=True).start()    # posters -> disk
     _updates(); _popular(); _trending("week"); _trending("day")   # warm the caches at boot
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
