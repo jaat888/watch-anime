@@ -226,7 +226,9 @@ def _build_shows():
             s, e = int(r.get("season") or 0), int(r.get("episode") or 0)
         except (TypeError, ValueError):
             continue
-        rec["eps"].setdefault((s, e), []).append(r)
+        lst = rec["eps"].setdefault((s, e), [])
+        if r not in lst:                 # rebuild-safe: no duplicate rows
+            lst.append(r)
     for rec in SHOWS.values():
         rec["movie"] = all((k[0] or 0) == 0 for k in rec["eps"]) if rec["eps"] else False
         rec["poster"] = rec["poster"] or POSTERS.get(rec["site_name"], "")
@@ -1863,7 +1865,7 @@ def _popular():
 # against the shows we actually have (exact + fuzzy), then filled with
 # TMDB's most-popular Japanese animation.  Cached 1 h per window; failures
 # keep the last good list.
-TREND_TTL = _env_int("TREND_TTL", 3600)
+TREND_TTL = _env_int("TREND_TTL", 600)
 TREND_PAGES = _env_int("TREND_PAGES", 15)         # 20 titles per page per kind
 _trend_cache = {w: {"t": 0, "data": [], "busy": False} for w in ("day", "week")}
 
@@ -2533,6 +2535,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
@@ -2822,7 +2825,7 @@ print("[rt2] BOOT v=" + VERSION, flush=True)
 def _auto_refresh():
     """Keeps episode lists fresh without a redeploy: re-reads one series'
     hub page every AUTO_REFRESH_SECONDS, oldest-checked first."""
-    gap = float(os.environ.get("AUTO_REFRESH_SECONDS", "15"))
+    gap = float(os.environ.get("AUTO_REFRESH_SECONDS", "5"))
     if gap <= 0:
         return
     last = {}
@@ -2839,6 +2842,80 @@ def _auto_refresh():
         except Exception as e:
             print("[rt2] auto refresh:", e, flush=True)
         time.sleep(gap)
+
+
+_INDEX_LOCK = threading.Lock()      # only ONE refresh_index.run at a time
+
+
+def _reload_catalog():
+    """Re-read episodes_index.jsonl and merge new shows/episodes into the
+    live SHOWS dict (no restart).  New shows get a poster in background."""
+    global ROWS
+    ROWS = _load_jsonl(os.path.join(BASE_DIR, "episodes_index.jsonl"))
+    with STORE_LOCK:
+        _build_shows()
+        missing = [r for r in SHOWS.values() if not r.get("poster")]
+    for rec in missing:
+        _bg_once(("poster", rec["slug"]), lambda rec=rec: _fetch_poster(rec))
+
+
+def _fresh_tick(feed_pages):
+    """Look at the site's newest posts (RSS).  Known shows are re-read at
+    once (new episodes show up now, not hours later); unknown hubs trigger
+    an index refresh so brand-new shows appear."""
+    import refresh_index as RI
+    links = []
+    for page in range(1, feed_pages + 1):
+        r = requests.get(f"{SITE}feed/?paged={page}", headers={"User-Agent": UA},
+                         timeout=20)
+        for it in re.findall(r"<item>(.*?)</item>", r.text or "", re.S):
+            m = re.search(r"<link>(.*?)</link>", it, re.S)
+            if m:
+                links.append(m.group(1).strip())
+    if not links:
+        return
+    with STORE_LOCK:
+        by_hub = {RI.strong(r["hub"]): r for r in SHOWS.values() if r.get("hub")}
+    unknown, touched = False, 0
+    for u in dict.fromkeys(links):
+        rec = by_hub.get(RI.strong(u))
+        if rec:
+            with _live_lock:
+                _live_cache.pop(rec.get("hub"), None)
+            try:
+                _absorb_live(rec, _live_rows(rec))
+                touched += 1
+            except Exception:
+                pass
+        elif RI.is_real_hub(u):
+            unknown = True
+    added = 0
+    if unknown and _INDEX_LOCK.acquire(blocking=False):
+        try:
+            before = len(SHOWS)
+            RI.run(feed_pages=feed_pages, quiet=True)
+            _reload_catalog()
+            added = len(SHOWS) - before
+        finally:
+            _INDEX_LOCK.release()
+    print(f"[rt2] fresh watch: {touched} shows re-read, +{added} new shows", flush=True)
+
+
+def _fresh_watch():
+    """Every FRESH_SECONDS (default 10 min) pull newly posted episodes and
+    shows from the site feed."""
+    gap = float(os.environ.get("FRESH_SECONDS", "600"))
+    pages = int(os.environ.get("FRESH_FEED_PAGES", "2"))
+    if gap <= 0:
+        return
+    time.sleep(45)
+    while True:
+        t0 = time.time()
+        try:
+            _fresh_tick(pages)
+        except Exception as e:
+            print("[rt2] fresh watch failed:", repr(e), flush=True)
+        time.sleep(max(30.0, gap - (time.time() - t0)))
 
 
 def _catalog_refresh():
@@ -2871,11 +2948,9 @@ def _catalog_refresh():
             if do_full:
                 last_full = time.time()
             before = len(SHOWS)
-            summary = refresh_index.run(quiet=True, full=do_full)
-            global ROWS
-            ROWS = _load_jsonl(os.path.join(BASE_DIR, "episodes_index.jsonl"))
-            with STORE_LOCK:
-                _build_shows()
+            with _INDEX_LOCK:
+                summary = refresh_index.run(quiet=True, full=do_full)
+                _reload_catalog()
             added = len(SHOWS) - before
             if added or summary:
                 print(f"[rt2] catalog refresh ({'full' if do_full else 'recent'}): "
@@ -2888,6 +2963,7 @@ def _catalog_refresh():
 def main():
     threading.Thread(target=_auto_refresh, daemon=True).start()
     threading.Thread(target=_catalog_refresh, daemon=True).start()
+    threading.Thread(target=_fresh_watch, daemon=True).start()
     threading.Thread(target=_tmdb_backfill, daemon=True).start()
     _updates(); _popular(); _trending("week"); _trending("day")   # warm the caches at boot
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT

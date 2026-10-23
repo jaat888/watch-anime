@@ -69,7 +69,9 @@ def collect_targets(feed_pages, full=False, max_pages=400):
             if l:
                 feed.append(l.group(1).strip())
         time.sleep(0.2)
-    for listing in ("/home/", "/2026/09/", time.strftime("/%Y/%m/")):
+    _t = time.gmtime()
+    _py, _pm = (_t.tm_year, _t.tm_mon - 1) if _t.tm_mon > 1 else (_t.tm_year - 1, 12)
+    for listing in ("/home/", f"/{_py}/{_pm:02d}/", time.strftime("/%Y/%m/")):
         try:
             r = requests.get(SITE + listing, headers=UA, timeout=30)
             cand |= set(re.findall(r'href="' + SITE + r'(/hindi/[^"]+?)/?"', r.text))
@@ -105,8 +107,28 @@ def run(feed_pages=12, quiet=False, full=False):
 
     cand, feed = collect_targets(feed_pages, full=full)
 
-    streams = json.loads((ROOT / "streams.json").read_text())
+    # streams.json is NOT in the repo zip -> start empty instead of crashing
+    # (this crash silently disabled new-show discovery completely)
+    try:
+        streams = json.loads((ROOT / "streams.json").read_text())
+    except (FileNotFoundError, ValueError):
+        streams = {"hub_pages": [], "episode_streams": []}
+    streams.setdefault("hub_pages", [])
+    streams.setdefault("episode_streams", [])
+    try:
+        _idx_lines = (ROOT / "episodes_index.jsonl").read_text().splitlines()
+    except FileNotFoundError:
+        _idx_lines = []
+    # a hub already present in the episode index is KNOWN, even if
+    # streams.json does not list it
     hub_keys = {strong(h["url"]) for h in streams["hub_pages"]}
+    for _l in _idx_lines:
+        try:
+            _u = json.loads(_l).get("hub_url") if _l.strip() else ""
+        except ValueError:
+            _u = ""
+        if _u:
+            hub_keys.add(strong(_u))
     targets = sorted({u for u in cand if is_real_hub(u)}
                      - {u for u in cand if strong(u) in hub_keys}) \
         + sorted({u for u in feed if is_real_hub(u) and strong(u) in hub_keys})
@@ -116,8 +138,7 @@ def run(feed_pages=12, quiet=False, full=False):
 
     hub_by_key = {strong(h["url"]): h for h in streams["hub_pages"]}
     ep_seen = {e["stream"] for e in streams["episode_streams"]}
-    old_idx = [json.loads(l) for l in
-               (ROOT / "episodes_index.jsonl").read_text().splitlines() if l.strip()]
+    old_idx = [json.loads(l) for l in _idx_lines if l.strip()]
     target_keys = {strong(t) for t in targets}
 
     new_hubs, new_rows, new_store_rows, fails = [], [], [], []
