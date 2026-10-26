@@ -24,6 +24,11 @@ if(t)d.className+=" tv"})();
 </script>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0b0a0c">
+<script>/* theme first: no white flash while the page loads */
+(function(){var d=document.documentElement,t="dark";try{t=localStorage.getItem("theme")||"dark"}catch(e){}
+if(t!=="light")t="dark";d.setAttribute("data-theme",t);
+if(t==="light"){var m=document.querySelector('meta[name="theme-color"]');if(m)m.content="#f6f3ee"}})();
+</script>
 <title>mollad_jaat — Watch Anime</title>
 <link rel="manifest" href="/app.webmanifest">
 <link rel="apple-touch-icon" href="/icon-192.png">
@@ -332,8 +337,8 @@ header{border-bottom:1px solid var(--line)}
 @keyframes navin{from{background:transparent;transform:scale(.88)}}
 html:not(.lite) #app>*{animation:pgin .4s cubic-bezier(.2,.7,.2,1) backwards}
 html:not(.lite) #app>*:nth-child(2){animation-delay:.04s}html:not(.lite) #app>*:nth-child(3){animation-delay:.08s}html:not(.lite) #app>*:nth-child(4){animation-delay:.12s}html:not(.lite) #app>*:nth-child(5){animation-delay:.16s}html:not(.lite) #app>*:nth-child(n+6){animation-delay:.2s}
-html:not(.lite) .nav button.on{animation:navin .35s ease backwards}
-html:not(.lite) .nav button.on svg{animation:navpop .5s cubic-bezier(.34,1.56,.64,1)}
+html:not(.lite) .nav button.on.pop{animation:navin .35s ease backwards}
+html:not(.lite) .nav button.on.pop svg{animation:navpop .5s cubic-bezier(.34,1.56,.64,1)}
 
 /* ===== v4: details page, episode rows, sticky genres, preview sheet, double-tap, splash, search, empty states ===== */
 .hero.dh{margin-top:2px}
@@ -471,9 +476,10 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("/sw.js").catch(
 
 /* ---------- bottom navigation ---------- */
 const IC={home:'<path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/>',browse:'<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',list:'<path d="M12 21s-7-4.6-9.3-9.2C1.2 8.6 3 5 6.4 5c2 0 3.6 1.2 5.6 3.4C14 6.2 15.6 5 17.6 5 21 5 22.8 8.6 21.3 11.8 19 16.4 12 21 12 21z"/>',acct:'<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4.5 4-6 8-6s7 1.5 8 6"/>'};
-function drawNav(){setTimeout(()=>{if(window.setHH)setHH()},0);const cur=location.hash.replace(/^#\/?/,"").split("/")[0];
+let LASTNAV=null;function drawNav(){setTimeout(()=>{if(window.setHH)setHH()},0);const cur=location.hash.replace(/^#\/?/,"").split("/")[0];
   const items=[["home","home","Home",()=>{$q.value="";filter="all";lang="all";genre="all";go("#/");route()}],["list","list","My List",()=>go("#/list")],["acct","acct","Account",()=>ME?accountModal():authModal()]];
-  $nav.replaceChildren(...items.map(([k,i,l,f])=>{const b=h("button",{class:(k==="home"&&!["list","show","watch"].includes(cur))||k===cur?"on":"",onclick:f},l);b.insertAdjacentHTML("afterbegin",'<svg viewBox="0 0 24 24">'+IC[i]+'</svg>');return b}))}
+  const isOn=k=>(k==="home"&&!["list","show","watch"].includes(cur))||k===cur,act=(items.find(x=>isOn(x[0]))||[""])[0],pop=act!==LASTNAV;LASTNAV=act;
+  $nav.replaceChildren(...items.map(([k,i,l,f])=>{const b=h("button",{class:isOn(k)?"on"+(pop?" pop":""):"",onclick:f},l);b.insertAdjacentHTML("afterbegin",'<svg viewBox="0 0 24 24">'+IC[i]+'</svg>');return b}))}
 
 /* ---------- account ---------- */
 let meReady=Promise.resolve();
@@ -503,10 +509,11 @@ const skHome=()=>[h("div",{class:"hero sk","aria-busy":"true"}),...skRail(),...s
 const skShow=()=>[h("div",{class:"back"},"\u00a0"),h("div",{class:"hero sk",style:"min-height:230px"}),h("h2",{class:"sec"},h("span",{class:"sk sk-h"})),h("div",{class:"eps"},Array.from({length:14},()=>h("div",{class:"ep sk"})))];
 const setLists=j=>{TRENDM=j.trending_movies||[];TOPR=j.top_rated||[];TOPM=j.top_movies||[];RECS=j.recent||[];RECM=j.recent_movies||[]};
 let sig="";const mkSig=j=>(j.shows||[]).length+"|"+(j.trending||[]).slice(0,30).join(",")+"|"+(j.trending_movies||[]).slice(0,15).join(",")+"|"+(j.top_rated||[]).slice(0,15).join(",")+"|"+(j.recent||[]).slice(0,15).join(",")+"|"+(j.shows||[]).reduce((a,x)=>a+(x.upd||0)%1000+(x.n||0),0);
-const saveShows=j=>{try{store.set("shows_v1",JSON.stringify(j))}catch(e){}};
+const saveShows=j=>{try{const t=JSON.stringify(j);if(t.length<4500000)store.set("shows_v1",t)}catch(e){}};
 async function loadShows(){if(SHOWS)return;
   /* the server inlines the list into this very page: render on first paint, no second request */
-  if(window.__BOOT__&&window.__BOOT__.shows){const j=window.__BOOT__;window.__BOOT__=null;SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);sig=mkSig(j);return}
+  if(window.__BOOT__&&window.__BOOT__.shows){const j=window.__BOOT__;window.__BOOT__=null;SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);sig=mkSig(j);
+    (window.requestIdleCallback||setTimeout)(()=>saveShows(j));if(Date.now()/1e3-(j.now||0)>120)setTimeout(refreshShows,800);return}
   /* instant paint from the last saved list, fresh data arrives silently right after */
   let c=null;try{c=JSON.parse(store.get("shows_v1")||"null")}catch(e){}
   if(c&&c.shows&&c.shows.length){SHOWS=c.shows;NOW=Date.now()/1e3;POP=c.popular||[];TREND=c.trending||POP;TRENDD=c.trending_day||[];setLists(c);sig=mkSig(c);setTimeout(refreshShows,300);return}
@@ -518,7 +525,8 @@ setInterval(()=>{if(!document.hidden)refreshShows()},3600000);
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&Date.now()-lastSync>3600000)refreshShows()});
 let SMAP=null;const bySlug=s=>{if(!SHOWS)return undefined;if(!SMAP||SMAP.size!==SHOWS.length)SMAP=new Map(SHOWS.map(x=>[x.slug,x]));return SMAP.get(s)};
 const isNew=s=>s.upd&&NOW-s.upd<7*86400;
-async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<120000)return c.v;let v=[];try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie)META[s.slug]={t:Date.now(),v};else if(c)return c.v;return v}
+const epTitle=v=>{const t=v&&v.title?String(v.title).trim():"";return t&&!/^(?:episode|ep\.?)\s*\d*$/i.test(t)?t:""};
+async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<(c.p?8000:120000))return c.v;let v=[],pend=false;try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];pend=!!(m.meta&&m.meta.ept_pending);if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie)META[s.slug]={t:Date.now(),v,p:pend};else if(c)return c.v;return v}
 function posterEl(s){const w=h("div",{class:"pw"}),f=()=>h("div",{class:"ph"},(s.name[0]||"?").toUpperCase());if(!s.poster){w.append(f());w.classList.add("ok");return w}
   /* landscape art -> fills the frame. portrait poster -> shown whole over a blurred copy of itself, so faces are never cut off */
   const b=h("div",{class:"bgb",style:bgStyle(s)}),i=h("img",{class:"poster",loading:"lazy",alt:"",referrerpolicy:"no-referrer",src:s.poster});
@@ -733,8 +741,9 @@ async function watchPage(slug,season,episode){killPlayer();const tok=WTOK,alive=
   const sb=(l,d)=>h("button",{class:"sb",onclick:()=>seek(d)},l);
   const cbar=h("div",{class:"cbar"},langBox,h("div",{class:"crow"},h("div",{class:"seekgrp"},sb("−10s",-10),sb("−0.1",-0.1),sb("+0.1",0.1),sb("+10s",10)),sels),
     h("div",{class:"sub"},"Audio slightly off? Nudge it with the 0.1 buttons."));
-  const title=s.movie?s.name:s.name+" · S"+season+" E"+episode;
-  $app.replaceChildren(...[h("button",{class:"back",onclick:()=>go("#/show/"+slug)},"← "+s.name),h("h2",{style:"margin:0 0 12px;font-size:19px"},title),box,nextBar,cbar,
+  const title=s.movie?s.name:s.name+" · S"+season+" E"+episode,ttl=h("h2",{style:"margin:0 0 12px;font-size:19px"},title);
+  const setEpT=vids=>{if(s.movie||!alive())return;const t=epTitle(vids.find(v=>+v.season===+season&&+v.episode===+episode));if(t)ttl.textContent="S"+season+" E"+episode+" · "+t};
+  $app.replaceChildren(...[h("button",{class:"back",onclick:()=>go("#/show/"+slug)},"← "+s.name),ttl,box,nextBar,cbar,
     h("div",{class:"panel slim"},h("label",{class:"chk"},auto,"Play next episode automatically"),h("div",{},dlBtn,h("div",{class:"dl",style:"margin-top:10px"},dlBar),dlLabel)),epBox].filter(Boolean));
   let nextEp=null;
   function drawEps(vids){
@@ -749,9 +758,9 @@ async function watchPage(slug,season,episode){killPlayer();const tok=WTOK,alive=
       const c=grid.querySelector(".cur");if(c)c.scrollIntoView({block:"nearest"})}
     epBox.replaceChildren(h("h2",{class:"sec"},"Episodes"),tabs,grid);paint()}
   if(!s.movie){const e=+episode;
-    getVids(s).then(vids=>{if(!alive())return;drawEps(vids);const sn=+season,list=vids.filter(v=>+v.season===sn).map(v=>+v.episode).sort((a,b)=>a-b);
+    getVids(s).then(vids=>{if(!alive())return;setEpT(vids);if(META[s.slug]&&META[s.slug].p)setTimeout(()=>{if(alive())getVids(s).then(setEpT)},9000);drawEps(vids);const sn=+season,list=vids.filter(v=>+v.season===sn).map(v=>+v.episode).sort((a,b)=>a-b);
       const nx=list.find(x=>x>e);if(nx)nextEp=[sn,nx];else{const ns=[...new Set(vids.map(v=>+v.season))].sort((a,b)=>a-b).find(x=>x>sn);if(ns)nextEp=[ns,Math.min(...vids.filter(v=>+v.season===ns).map(v=>+v.episode))]}
-      if(nextEp){nextBtn.style.display="";nextBtn.textContent="Next episode · S"+nextEp[0]+" E"+nextEp[1]+" ›";nextBtn.onclick=()=>go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1])}})}
+      if(nextEp){nextBtn.style.display="";const nt=epTitle(vids.find(v=>+v.season===nextEp[0]&&+v.episode===nextEp[1]));nextBtn.textContent="Next episode · S"+nextEp[0]+" E"+nextEp[1]+(nt?" · "+nt:"")+" ›";nextBtn.onclick=()=>go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1])}})}
   let data;try{data=await api("/api/watch/"+slug+(s.movie?"":"/"+season+"/"+episode))}catch(e){if(alive())msg.textContent="Server error. Please try again shortly.";return}
   if(!alive())return;
   const src=data.sources||[];if(!src.length){msg.textContent="No playable stream is available for this title yet.";return}

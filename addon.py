@@ -41,6 +41,7 @@ IDS
 Run:  python3 addon.py [port]     (binds 0.0.0.0)
 """
 import base64
+import difflib
 import zlib
 import gzip
 import hashlib
@@ -1569,6 +1570,205 @@ def handle_manifest(base):
     }
 
 
+# ------------------------------------------------- episode titles ---
+# "S1 E1" -> "S1 E1 · The Iceblade Sorcerer ...".  Order: AniList (the
+# Crunchyroll titles) -> TMDB -> nothing (the page then keeps plain "S1 E1").
+# Only the TITLE is taken.  Results live in memory + the same SQL table the
+# TMDB info uses (key "ept:<slug>", "gf":1 keeps the genre migration away).
+ANILIST_URL = "https://graphql.anilist.co"
+EPT_TTL_OK = 14 * 86400      # every wanted episode has a title
+EPT_TTL_NEW = 6 * 3600       # some wanted episode still has none (airing show)
+EPT_TTL_NF = 24 * 3600       # nothing found anywhere -> look again daily
+EPT_RETRY = 600              # network error -> try again after ~10 min
+_EPT_FAIL = {}               # slug -> time of last network failure (memory only)
+_ept_lock = threading.Lock()
+_ANILIST_Q = ("query($q:String){Page(perPage:8){media(search:$q,type:ANIME,"
+              "sort:SEARCH_MATCH){id format episodes title{romaji english}"
+              " synonyms streamingEpisodes{title}}}}")
+_EPT_NUM_RE = re.compile(
+    r"^\s*(?:episode|ep\.?|e)\s*(\d{1,4})\s*[-\u2013\u2014:.]\s*(.+?)\s*$", re.I)
+_EPT_GENERIC_RE = re.compile(r"^\s*(?:episode|ep\.?|e)\s*\d{0,4}\s*$", re.I)
+
+
+def _ept_norm(s):
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _ept_season_hint(title):
+    """Season number a title mentions ('... Season 2', '3rd Season', 'II'), else 0."""
+    t = _ept_norm(title)
+    m = (re.search(r"\bseason (\d{1,2})\b", t) or re.search(r"\b(\d{1,2})(?:st|nd|rd|th) season\b", t)
+         or re.search(r"\bpart (\d{1,2})\b", t))
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(ii|iii|iv|v|vi)\b$", t)
+    return {"ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6}[m.group(1)] if m else 0
+
+
+def _ept_clean_title(t):
+    t = re.sub(r"\s+", " ", (t or "")).strip()
+    if not t or _EPT_GENERIC_RE.match(t):
+        return ""
+    return t[:160]
+
+
+def _ept_covers(titles, eps):
+    """True when the title list really belongs to this season of the show
+    (guards against absolute numbering, e.g. AniList's One Piece 1089+)."""
+    return bool(eps) and len(set(titles) & set(eps)) / len(eps) >= 0.6
+
+
+def _ept_anilist(name, season, eps):
+    """{episode: title} from AniList's streamingEpisodes (Crunchyroll titles)."""
+    query = name if season <= 1 else f"{name} Season {season}"
+    r = requests.post(ANILIST_URL, json={"query": _ANILIST_Q, "variables": {"q": query}},
+                      timeout=8, headers={"Accept": "application/json"})
+    r.raise_for_status()
+    media = ((r.json().get("data") or {}).get("Page") or {}).get("media") or []
+    want = _ept_norm(name)
+    best, best_score = None, 0.0
+    for m in media:
+        if not m.get("streamingEpisodes"):
+            continue
+        names = [(m.get("title") or {}).get("english"), (m.get("title") or {}).get("romaji")] + list(m.get("synonyms") or [])
+        score = 0.0
+        for nm in names:
+            if not nm:
+                continue
+            base = _ept_norm(re.sub(r"\b(?:season|part)\s*\d+\b|\b\d+(?:st|nd|rd|th) season\b", " ", nm, flags=re.I))
+            score = max(score, difflib.SequenceMatcher(None, want, base).ratio())
+        hint = max((_ept_season_hint(nm) for nm in names if nm), default=0)
+        if season > 1:
+            score += 0.15 if hint == season else (-0.25 if hint and hint != season else 0)
+        elif hint > 1:
+            score -= 0.25
+        if (m.get("format") or "") in ("MOVIE", "MUSIC", "SPECIAL"):
+            score -= 0.3
+        if score > best_score:
+            best, best_score = m, score
+    if not best or best_score < 0.6:
+        return {}
+    out, pos = {}, 0
+    for se in best["streamingEpisodes"]:
+        pos += 1
+        mm = _EPT_NUM_RE.match(se.get("title") or "")
+        if mm:
+            n, t = int(mm.group(1)), _ept_clean_title(mm.group(2))
+        else:
+            n, t = pos, _ept_clean_title(se.get("title"))
+        if t and n not in out:
+            out[n] = t
+    return out if _ept_covers(out, eps) else {}
+
+
+def _ept_tmdb(name, season, eps):
+    """{episode: title} from TMDB /tv/{id}/season/{n}; placeholder names skipped."""
+    want = _ept_norm(name)
+    cands = _tmdb_get("/search/tv", query=name, language="en-US").get("results") or []
+    tried = 0
+    for c in cands[:5]:
+        sim = max(difflib.SequenceMatcher(None, want, _ept_norm(c.get(k))).ratio()
+                  for k in ("name", "original_name"))
+        if sim < 0.6:
+            continue
+        tried += 1
+        if tried > 3:
+            break
+        try:
+            j = _tmdb_get(f"/tv/{c['id']}/season/{season}", language="en-US")
+        except requests.HTTPError as e:           # no such season on this entry
+            if getattr(e.response, "status_code", 0) == 404:
+                continue
+            raise
+        out = {}
+        for ep in j.get("episodes") or []:
+            t = _ept_clean_title(ep.get("name"))
+            if t and ep.get("episode_number") is not None:
+                out[int(ep["episode_number"])] = t
+        if _ept_covers(out, eps):
+            return out
+    return {}
+
+
+def _ept_fetch(rec):
+    """-> ({"s:e": title}, network_failed)."""
+    with STORE_LOCK:
+        want = {}
+        for (s, e) in rec["eps"]:
+            if e:
+                want.setdefault(s or 1, set()).add(e)
+    name = _tmdb_clean(rec["name"])
+    out, failed = {}, False
+    for s, eps in want.items():
+        got = {}
+        try:
+            got = _ept_anilist(name, s, eps)
+        except requests.RequestException:
+            failed = True
+        except Exception:
+            got = {}
+        if set(eps) - set(got):                   # AniList missed some -> TMDB fills only those
+            try:
+                for e, t in _ept_tmdb(name, s, eps).items():
+                    got.setdefault(e, t)
+            except requests.RequestException:
+                failed = True
+            except Exception:
+                pass
+        for e, t in got.items():
+            if e in eps:
+                out[f"{s}:{e}"] = t
+    return out, failed
+
+
+def _ept_job(rec):
+    slug = rec["slug"]
+    out, failed = _ept_fetch(rec)
+    if failed and not out:
+        _EPT_FAIL[slug] = time.time()             # nothing cached: retried in ~10 min
+        return
+    _EPT_FAIL.pop(slug, None)
+    entry = {"gf": 1, "t": time.time(), "m": out}
+    with _tmdb_lock:
+        _TMDB_CACHE["ept:" + slug] = entry
+    try:
+        accounts.tmdb_set("ept:" + slug, entry)
+    except Exception as e:
+        applog.log_once("ept-save", 300, "error", "app", f"episode titles save failed ({slug}): {e!r}")
+
+
+def _ep_titles(rec, wait=0.0):
+    """-> ({"s:e": title}, pending).  Never raises, never blocks longer than `wait` s.
+    A stale entry is served at once and refreshed in the background."""
+    slug = rec["slug"]
+    try:
+        with STORE_LOCK:
+            wanted = {f"{s or 1}:{e}" for (s, e) in rec["eps"] if e}
+        ent = _TMDB_CACHE.get("ept:" + slug)
+        age = time.time() - float(ent.get("t", 0)) if isinstance(ent, dict) else None
+        m = (ent or {}).get("m") or {} if isinstance(ent, dict) else {}
+        if age is not None:
+            ttl = EPT_TTL_OK if wanted <= set(m) else (EPT_TTL_NEW if m else EPT_TTL_NF)
+            if age > ttl:
+                _bg_once(("ept", slug), lambda r=rec: _ept_job(r))
+            return m, False
+        if time.time() - _EPT_FAIL.get(slug, 0) < EPT_RETRY:
+            return {}, False
+        _bg_once(("ept", slug), lambda r=rec: _ept_job(r))
+        t0 = time.time()
+        while time.time() - t0 < wait:
+            time.sleep(0.1)
+            ent = _TMDB_CACHE.get("ept:" + slug)
+            if isinstance(ent, dict):
+                return ent.get("m") or {}, False
+            if time.time() - _EPT_FAIL.get(slug, 0) < EPT_RETRY:
+                return {}, False
+        return {}, True
+    except Exception:
+        return {}, False
+
+
+
 def handle_meta(mtype, mid):
     slug = mid.split(":", 1)[1] if ":" in mid else mid
     rec = SHOWS.get(slug)
@@ -1636,6 +1836,13 @@ def handle_meta(mtype, mid):
                 vids.append({"id": f"raretoons2:{slug}:{s}:{e}",
                              "season": s, "episode": e,
                              "title": title, "name": title})
+        titles, pending = _ep_titles(rec, wait=4.0)
+        for v in vids:
+            t = titles.get(f"{v['season']}:{v['episode']}")
+            if t:
+                v["title"] = v["name"] = t
+        if pending:
+            meta["ept_pending"] = True
         meta["videos"] = vids
     return meta
 
