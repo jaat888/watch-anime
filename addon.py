@@ -41,6 +41,7 @@ IDS
 Run:  python3 addon.py [port]     (binds 0.0.0.0)
 """
 import base64
+import zlib
 import gzip
 import hashlib
 import hmac
@@ -91,7 +92,7 @@ _LW             = LIST_WAIT if OPTIMISTIC else LIST_BUDGET
 SHOWS_TTL       = _env_int("SHOWS_TTL", 45)        # /api/shows payload cache
 PL_TTL          = _env_int("PL_TTL", 300)          # HLS playlist cache (VOD)
 
-VERSION  = "3.4.5"
+VERSION  = "3.5.0"
 ADDON_ID = "community.raretoons2"
 ADDON_NAME = "mollad_jaat"
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -139,6 +140,19 @@ def _load_jsonl(path):
 
 ROWS = _load_jsonl(os.path.join(BASE_DIR, "episodes_index.jsonl"))
 
+
+def _hub_key(r):
+    return (r.get("hub_url") or "").split("#")[0].rstrip("/").lower()
+
+
+def _hub_hashes(rows):
+    """hub -> md5 of its rows (order independent)."""
+    by = {}
+    for r in rows:
+        by.setdefault(_hub_key(r), []).append(json.dumps(r, sort_keys=True, ensure_ascii=False))
+    return {k: hashlib.md5("\n".join(sorted(v)).encode("utf-8")).hexdigest() for k, v in by.items()}
+
+
 POSTERS = {}
 try:
     with open(os.path.join(BASE_DIR, "posters.json"), encoding="utf-8") as fh:
@@ -149,11 +163,15 @@ except Exception:
 
 def _display(show):
     """Human hub name; Subbed/Dubbed variants must stay distinct."""
-    s = re.split(r"\s+(?:[-–]\s+)?(?:Hindi|Tamil|Telugu|WatchMulti|Multi)\b",
+    s = re.split(r"\s+(?:[-–]\s+)?(?:Hindi|Tamil|Telugu|WatchMulti|Multi|English(?=\s+(?:Sub|Dub))|Download\b)",
                  show or "", maxsplit=1)[0].strip(" -–")
     s = re.sub(r"\s*(?:[-–]\s*)?Episodes?\.?\s*$", "", s, flags=re.I).strip(" -–")
+    # movie titles: "X (2025) Movie" / "X (Movie - 2021)" -> "X (2025)" / "X (2021)"
+    s = re.sub(r"\(\s*Movie\s*[-–:]?\s*(\d{4})\s*\)", r"(\1)", s, flags=re.I)
+    s = re.sub(r"(\(\s*\d{4}\s*\))\s*Movie\s*$", r"\1", s, flags=re.I)
+    s = re.sub(r"\s+", " ", s).strip(" -–")
     if re.search(r"subbed", show or "", re.I):
-        s += " (Hindi Sub)"
+        s += " (Eng Sub)" if re.search(r"english", show or "", re.I) else " (Hindi Sub)"
     elif re.search(r"dubbed", show or "", re.I):
         s += " (Hindi Dub)"
     return s or show
@@ -218,15 +236,24 @@ def _migrate_genres():
         print(f"[rt2] genres saved for {n} shows", flush=True)
 
 
+_DB_READY = threading.Event()      # set once the last saved state was read back from the DB
+_TMDB_LOADED = threading.Event()
+
+
 def _tmdb_boot():
     """Background boot: load the whole tmdb table, fill genres/desc/rating into
     the already-built SHOWS, then run the one-time genre migration."""
     global _TMDB_CACHE
-    try:
-        loaded = accounts.tmdb_all()
-    except Exception as e:
-        print(f"[rt2] tmdb cache load failed: {repr(e)}", flush=True)
-        loaded = {}
+    delay = 5
+    while True:                      # DB asleep? keep trying - never fall back to re-fetching everything
+        try:
+            loaded = accounts.tmdb_all()
+            break
+        except Exception as e:
+            print(f"[rt2] tmdb cache load failed (DB asleep?), retry in {delay}s: {repr(e)}", flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 120)
+    _TMDB_LOADED.set()
     with _tmdb_lock:
         loaded.update(_TMDB_CACHE)       # anything saved meanwhile wins
         _TMDB_CACHE = loaded
@@ -276,6 +303,11 @@ def _build_shows():
 _build_shows()
 SERIES = [r for r in SHOWS.values() if not r["movie"]]
 MOVIES = [r for r in SHOWS.values() if r["movie"]]
+
+# what shipped with this deploy (taken AFTER _build_shows, which normalises some
+# rows): anything that differs later is saved to the DB
+BASE_HUBS = _hub_hashes(ROWS)
+BASE_SIG = hashlib.md5(json.dumps(sorted(BASE_HUBS.items())).encode("utf-8")).hexdigest()
 
 # shared store lock: guards SHOWS[x]["eps"] mutation AND iteration
 STORE_LOCK = threading.RLock()
@@ -1195,6 +1227,7 @@ def _tmdb_backfill():
     if not TMDB_API_KEY:
         return
     time.sleep(30)
+    _TMDB_LOADED.wait(900)           # only look things up that the DB really does not have
     while True:
         try:
             now = time.time()
@@ -1864,6 +1897,14 @@ _CARTOON_WORDS = (
     "bob the builder", "peppa", "oggy", "mr bean", "gumball", "johnny test",
     "kids next door", "codename", "pixi post", "peabody", "turning mecard",
     "mecard", "ladybug", "the loud house",
+    # western animated movies (not anime)
+    "toy story", "minions", "despicable me", "cloudy with a chance", "spirit untamed",
+    "atlantis", "shrek", "kung fu panda", "ice age", "madagascar", "moana", "zootopia",
+    "the incredibles", "finding nemo", "finding dory", "how to train your dragon",
+    "hotel transylvania", "puss in boots", "lion king", "wreck-it ralph", "big hero 6",
+    "grand theft auto", "super mario", "sonic the hedgehog", "angry birds", "the croods",
+    "megamind", "coraline", "boss baby", "chicken run", "inside out", "monsters, inc",
+    "monsters inc", "encanto",
 )
 _CARTOON_EXTRA = tuple(w.strip().lower() for w in
                        os.environ.get("CARTOON_EXTRA", "").split(",") if w.strip())
@@ -1903,14 +1944,49 @@ def _api_shows_build():
                           "rating": info.get("r"), "d": _short_desc(info.get("d")),
                           "n": sum(1 for k in r["eps"] if k[0])})
     upd = _updates()
+    added = _added()
     for it in items:
         it["upd"] = int(upd.get(it["slug"], 0))
+        it["add"] = int(added.get(it["slug"], 0))
         if it["poster"].startswith("https://"):
             it["poster"] = "/img/s/" + it["slug"]      # short link; hides the source site
+    top_rated, top_movies, recent, recent_movies = _derived_lists(items)
     items.sort(key=lambda x: x["name"].lower())
     return {"shows": items, "now": int(time.time()), "popular": _popular(),
             "trending": _trending("week"),
-            "trending_day": _trending("day")}
+            "trending_day": _trending("day"),
+            "trending_movies": _trending("movies"),
+            "top_rated": top_rated, "top_movies": top_movies,
+            "recent": recent, "recent_movies": recent_movies}
+
+
+def _derived_lists(items):
+    """Top rated / Recently added lists (slugs), one entry per franchise.
+    Pure in-memory; cheap enough to recompute with every payload build."""
+    ok = [it for it in items if it["kind"] == "anime" and it["poster"]]
+
+    def pick(rows, keyf, n):
+        seen, out = set(), []
+        for it in rows:
+            k = keyf(it)
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(it["slug"])
+            if len(out) >= n:
+                break
+        return out
+
+    ser = [it for it in ok if not it["movie"]]
+    mov = [it for it in ok if it["movie"]]
+    rated = lambda rows: sorted((it for it in rows if it.get("rating")),
+                                key=lambda it: (-float(it["rating"]), -it["n"], it["ord"]))
+    top_rated = pick(rated(ser), lambda it: _fr_key(it["name"]), TOP_RATED_N)
+    top_movies = pick(rated(mov), lambda it: _mv_key(it["name"]), TOP_MOVIES_N)
+    newest = lambda rows: sorted(rows, key=lambda it: (-it["add"], -it["ord"]))
+    recent = pick(newest(ser), lambda it: _fr_key(it["name"]), RECENT_N)
+    recent_movies = pick(newest(mov), lambda it: _mv_key(it["name"]), RECENT_N)
+    return top_rated, top_movies, recent, recent_movies
 
 
 def _show_info_cached(rec):
@@ -2116,40 +2192,105 @@ def _popular():
     return _pop_cache["data"]
 
 
-# --------------------------------------- AniList + own-signal trending ---
-# India/Hindi-first trending, anime only (no cartoons, no movies of other
-# kinds unless AniList itself lists them).  Signals, per window (day/week):
-#   * AniList TRENDING_DESC rank           (what anime fans watch right now)
-#   * AniList airing-now POPULARITY rank   (only shows that are on air)
-#   * new episode on OUR site recently     (Hindi dub that just dropped)
-#   * distinct users who watched it on our site in the window
-# Only shows that exist on our site WITH Hindi are eligible; one entry per
-# franchise (newest season).  A half-loaded AniList answer is never cached:
-# the last complete one stays and the failure goes to the log.
-TREND_TTL = _env_int("TREND_TTL", 600)
-AL_TTL = _env_int("ANILIST_TTL", 1800)
+# --------------------------------- AniList + own-signal trending (DB-backed) ---
+# India/Hindi-first trending, anime only (no cartoons).  Series and movies are
+# ranked SEPARATELY ("week" / "day" -> series, "movies" -> movies only).
+#
+# Everything slow or remote is saved in the database (accounts.kv) so a
+# restart/redeploy never starts from zero:
+#   al_cache / al_meta   last AniList answer + when it was fetched
+#   trend_<window>       last finished list per window
+#   added_at             first time each show was seen (Recently added)
+#   sync_t               last hourly sync
+# AniList is asked at most once per AL_TTL (1 h).  When the answer is the same
+# as the stored one nothing is written; a failed answer never replaces the last
+# complete one.
+#
+# Signals (series): AniList trending rank, AniList airing-now popularity rank,
+# new episode on OUR site recently, distinct users watching on our site.
+# Only shows that exist on our site WITH Hindi are eligible; ONE entry per
+# franchise (the newest season) - never "Season 1" and "Season 4" together.
+TREND_TTL = _env_int("TREND_TTL", 3600)
+AL_TTL = _env_int("ANILIST_TTL", 3600)
+SYNC_SECONDS = _env_int("SYNC_SECONDS", 3600)
+TREND_N = {"week": _env_int("TREND_WEEK_N", 80),
+           "day": _env_int("TREND_DAY_N", 50),
+           "movies": _env_int("TREND_MOVIES_N", 40)}
+TOP_RATED_N = _env_int("TOP_RATED_N", 55)
+TOP_MOVIES_N = _env_int("TOP_MOVIES_N", 40)
+RECENT_N = _env_int("RECENT_N", 40)
 AL_URL = "https://graphql.anilist.co"
-_AL_Q = ("query($p:Int,$sort:[MediaSort]%s){Page(page:$p,perPage:50){media(type:ANIME,sort:$sort%s,"
-         "countryOfOrigin:JP,isAdult:false){id title{romaji english native} synonyms format status "
-         "trending popularity}}}")
-_al = {"t": 0.0, "ok": 0.0, "trend": [], "air": [], "busy": False, "err": ""}
-_trend_cache = {w: {"t": 0.0, "data": [], "busy": False} for w in ("day", "week")}
+_al = {"t": 0.0, "ok": 0.0, "trend": [], "air": [], "mtrend": [], "mpop": [],
+       "busy": False, "err": "", "h": ""}
+_trend_cache = {w: {"t": 0.0, "data": [], "busy": False, "h": ""}
+                for w in ("day", "week", "movies")}
+
+
+def _kv_float(k, default=0.0):
+    try:
+        return float(accounts.kv_get(k) or default)
+    except Exception:
+        return default
+
+
+def _kv_put(k, v):
+    try:
+        accounts.kv_set(k, v if isinstance(v, str) else str(v))
+        return True
+    except Exception as e:
+        applog.log_once("kv-" + k, 300, "warn", "app", f"db save '{k}' failed: {e!r}")
+        return False
+
+
+def _h(obj):
+    return hashlib.md5(json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                                  ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def _tn_norm(s):
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
+_FR_NOISE = re.compile(r"\b(?:oad|ova|ona|specials?|recap|movie|the\s+movie|tv)\b", re.I)
+_YEAR = re.compile(r"\(?\b(?:19|20)\d{2}\b\)?")
+
+
 def _fr_key(name):
-    """Franchise key: season / part / dub words removed ('AoT Season 2 (Hindi Dub)' -> 'aot')."""
-    return _tn_norm(_tmdb_clean(name))
+    """Franchise key: season / part / dub / OAD words removed
+    ('AoT Season 2 (Hindi Dub)' and 'AoT OAD' -> same key)."""
+    s = _tmdb_clean(name)
+    s = _FR_NOISE.sub(" ", s)
+    s = _YEAR.sub(" ", s)
+    return _tn_norm(s) or _tn_norm(name)
 
 
-def _al_page(sort, page, status=None):
+def _mv_key(name):
+    """Movie key: year / 'Movie' / language words removed."""
+    s = _tmdb_clean(name)
+    s = re.sub(r"\b(?:the\s+)?movie\b", " ", s, flags=re.I)
+    s = _YEAR.sub(" ", s)
+    return _tn_norm(s) or _tn_norm(name)
+
+
+def _al_slim(m):
+    t = m.get("title") or {}
+    return {"i": m.get("id"), "t": [t.get("romaji"), t.get("english"), t.get("native")],
+            "s": list(m.get("synonyms") or [])[:6], "f": m.get("format")}
+
+
+def _al_page(sort, page, status=None, fmt=None):
     var = {"p": page, "sort": [sort]}
+    decl, args = "$p:Int,$sort:[MediaSort]", "type:ANIME,sort:$sort,countryOfOrigin:JP,isAdult:false"
     if status:
         var["st"] = status
-    q = _AL_Q % (",$st:MediaStatus" if status else "", ",status:$st" if status else "")
+        decl += ",$st:MediaStatus"
+        args += ",status:$st"
+    if fmt:
+        var["fm"] = fmt
+        decl += ",$fm:MediaFormat"
+        args += ",format:$fm"
+    q = ("query(%s){Page(page:$p,perPage:50){media(%s){id title{romaji english native} "
+         "synonyms format status trending popularity}}}" % (decl, args))
     r = creq.post(AL_URL, json={"query": q, "variables": var},
                   headers={"User-Agent": UA, "Accept": "application/json"},
                   timeout=20, impersonate="chrome")
@@ -2161,10 +2302,10 @@ def _al_page(sort, page, status=None):
     return ((j.get("data") or {}).get("Page") or {}).get("media") or []
 
 
-def _al_list(sort, pages, status=None):
+def _al_list(sort, pages, status=None, fmt=None):
     out = []
     for p in range(1, pages + 1):
-        res = _al_page(sort, p, status)
+        res = _al_page(sort, p, status, fmt)
         if not res:
             raise RuntimeError(f"anilist {sort} page {p} empty")
         out += res
@@ -2173,21 +2314,43 @@ def _al_list(sort, pages, status=None):
 
 
 def _al_titles(m):
-    t = m.get("title") or {}
-    names = [t.get("romaji"), t.get("english"), t.get("native")] + list(m.get("synonyms") or [])
+    names = list(m.get("t") or []) + list(m.get("s") or [])
     ks = []
     for n in names:
-        k = _fr_key(n)
+        k = _fr_key(n) if n else ""
         if len(k) >= 4 and k not in ks:
             ks.append(k)
     return ks
 
 
-def _al_refresh():
-    """Reload both AniList lists.  All-or-nothing."""
+def _al_load_db():
+    """Boot: take the last AniList answer from the database (no network)."""
     try:
-        trend = _al_list("TRENDING_DESC", 3)
-        air = _al_list("POPULARITY_DESC", 2, status="RELEASING")
+        raw = accounts.kv_get("al_cache")
+        meta = json.loads(accounts.kv_get("al_meta") or "{}")
+        if raw:
+            d = json.loads(raw)
+            t_db = float(meta.get("t") or 0)
+            if t_db <= _al["t"]:
+                return                           # already fetched something newer meanwhile
+            _al.update({k: d.get(k) or [] for k in ("trend", "air", "mtrend", "mpop")})
+            _al["h"] = meta.get("h") or _h(d)
+            _al["t"] = t_db
+            _al["ok"] = _al["t"]
+            print(f"[trend] AniList restored from DB ({len(_al['trend'])} trending, "
+                  f"{len(_al['mtrend'])} movies), age {int(time.time() - _al['t'])}s", flush=True)
+    except Exception as e:
+        print("[trend] AniList restore failed:", repr(e), flush=True)
+
+
+def _al_refresh():
+    """Reload the AniList lists.  All-or-nothing.  Returns True when the
+    answer DIFFERS from the stored one (and was saved), False otherwise."""
+    try:
+        d = {"trend": _al_list("TRENDING_DESC", 3),
+             "air": _al_list("POPULARITY_DESC", 2, status="RELEASING"),
+             "mtrend": _al_list("TRENDING_DESC", 2, fmt="MOVIE"),
+             "mpop": _al_list("POPULARITY_DESC", 2, fmt="MOVIE")}
     except Exception as e:
         _al["err"] = repr(e)[:200]
         _al["t"] = time.time() - AL_TTL + 300         # retry in 5 min
@@ -2195,12 +2358,28 @@ def _al_refresh():
                         f"AniList refresh failed (keeping last good list, "
                         f"{len(_al['trend'])} titles): {_al['err']}")
         return False
-    _al.update(trend=trend, air=air, t=time.time(), ok=time.time(), err="")
-    print(f"[trend] AniList ok: {len(trend)} trending, {len(air)} airing", flush=True)
-    return True
+    d = {k: [_al_slim(m) for m in v] for k, v in d.items()}
+    # trending rank shifts constantly, so compare the SET of titles per list
+    sig = _h({k: sorted(str(m["i"]) for m in v) for k, v in d.items()})
+    changed = sig != _al["h"]
+    now = time.time()
+    _al.update(d, t=now, ok=now, err="")
+    if changed:
+        _al["h"] = sig
+        _kv_put("al_cache", json.dumps(d, separators=(",", ":"), ensure_ascii=False))
+    _kv_put("al_meta", json.dumps({"t": now, "h": _al["h"]}))
+    print(f"[trend] AniList ok: {len(d['trend'])} trending, {len(d['air'])} airing, "
+          f"{len(d['mtrend'])} movies ({'changed' if changed else 'unchanged'})", flush=True)
+    return changed
+
+
+_BOOT_T = time.time()
 
 
 def _al_ensure():
+    # cold DB: wait (max 5 min) for the saved AniList answer before asking AniList again
+    if not _DB_READY.is_set() and time.time() - _BOOT_T < 300:
+        return
     if time.time() - _al["t"] > AL_TTL and not _al["busy"]:
         _al["busy"] = True
 
@@ -2213,12 +2392,26 @@ def _al_ensure():
 
 
 def _season_no(name):
-    m = re.search(r"season\s*(\d+)|(\d+)(?:st|nd|rd|th)\s+season", name or "", re.I)
+    m = re.search(r"season\s*0*(\d+)|(\d+)(?:st|nd|rd|th)\s+season", name or "", re.I)
     return int(m.group(1) or m.group(2)) if m else 1
 
 
+def _rating_of(slug):
+    try:
+        return float((_TMDB_CACHE.get(slug) or {}).get("r") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fresh_w(ts, now, steps):
+    if not ts:
+        return 0.0
+    age = (now - ts) / 3600.0
+    return next((v for lim, v in steps if age <= lim), 0.0)
+
+
 def _build_trending(window):
-    """-> ordered [slug,...], best first.  Pure in-memory + one small SQL query."""
+    """-> ordered [slug,...], best first.  SERIES only (movies have their own list)."""
     now = time.time()
     span = 86400 if window == "day" else 7 * 86400
     try:
@@ -2229,7 +2422,7 @@ def _build_trending(window):
     upd = _updates()
     with STORE_LOCK:
         recs = [r for r in SHOWS.values()
-                if _kind(r["name"]) == "anime" and "Hindi" in _show_langs(r)]
+                if not r["movie"] and _kind(r["name"]) == "anime" and "Hindi" in _show_langs(r)]
     fam = {}                                   # franchise key -> [rec]
     for r in recs:
         fam.setdefault(_fr_key(r["name"]), []).append(r)
@@ -2237,48 +2430,125 @@ def _build_trending(window):
 
     def fam_for(k):
         if k in fam:
-            return fam[k]
+            return k
         if len(k) >= 8:                        # strict prefix, never loose fuzzy
             for fk in keys:
                 if len(fk) >= 8:
                     s, l = (k, fk) if len(k) <= len(fk) else (fk, k)
                     if l.startswith(s) and len(s) / len(l) >= 0.75:
-                        return fam[fk]
+                        return fk
         return None
 
     score = {}                                 # franchise key -> {"a":..,"t":..}
     for src, lst, n in (("t", _al["trend"], 150.0), ("a", _al["air"], 100.0)):
         for rank, m in enumerate(lst):
+            if m.get("f") == "MOVIE":
+                continue
             for k in _al_titles(m):
-                f = fam_for(k)
-                if f:
-                    fk = _fr_key(f[0]["name"])
+                fk = fam_for(k)
+                if fk:
                     d = score.setdefault(fk, {})
                     d[src] = max(d.get(src, 0.0), 1.0 - rank / n)
                     break
-    for fk, rs in fam.items():                 # own signals can add shows AniList missed
+    for fk in fam:                             # own signals can add shows AniList missed
         score.setdefault(fk, {})
 
-    def fresh(ts):
-        if not ts:
-            return 0.0
-        age = (now - ts) / 3600.0
-        steps = ((24, 1.0), (72, 0.6), (168, 0.3)) if window == "day" else ((72, 1.0), (168, 0.7), (336, 0.3))
-        return next((v for lim, v in steps if age <= lim), 0.0)
-
+    steps = ((24, 1.0), (72, 0.6), (168, 0.3)) if window == "day" else ((72, 1.0), (168, 0.7), (336, 0.3))
     wt = (0.45, 0.15, 0.25, 0.15) if window == "day" else (0.30, 0.25, 0.25, 0.20)
-    ranked = []
+    ranked, rest = [], []
     for fk, d in score.items():
         rs = fam[fk]
-        # one entry per franchise: newest season that has the freshest episode
-        best = max(rs, key=lambda r: (upd.get(r["slug"], 0) or 0, _season_no(r["name"]), len(r["eps"])))
-        fr = max(fresh(upd.get(r["slug"], 0)) for r in rs)
+        # ONE entry per franchise: the newest season (never S1 next to S4)
+        best = max(rs, key=lambda r: (_season_no(r["name"]), upd.get(r["slug"], 0) or 0, len(r["eps"])))
+        fr = max(_fresh_w(upd.get(r["slug"], 0), now, steps) for r in rs)
         wc = sum(watch.get(r["slug"], 0) for r in rs)
         s = (wt[0] * d.get("t", 0) + wt[1] * d.get("a", 0) + wt[2] * fr + wt[3] * min(1.0, wc / 5.0))
         if s > 0:
             ranked.append((s, best["slug"]))
+        else:
+            rest.append((max(_rating_of(r["slug"]) for r in rs), best["slug"]))
     ranked.sort(key=lambda x: -x[0])
-    return [slug for _s, slug in ranked[:60]]
+    out = [slug for _s, slug in ranked]
+    # not enough signals for a long list -> top up with the best-rated franchises
+    rest.sort(key=lambda x: -x[0])
+    out += [slug for _r, slug in rest]
+    return out[:TREND_N[window]]
+
+
+def _al_movie_match(recs_keys, lst, n):
+    """AniList movie list -> {slug: best 0..1 rank score}."""
+    out = {}
+    for rank, m in enumerate(lst):
+        for k in _al_titles(m):
+            hit = None
+            for slug, rk in recs_keys:
+                if rk == k:
+                    hit = slug
+                elif len(k) >= 8 and len(rk) >= 8:
+                    s, l = (k, rk) if len(k) <= len(rk) else (rk, k)
+                    if s in l and len(s) / len(l) >= 0.6:
+                        hit = slug
+                if hit:
+                    out[hit] = max(out.get(hit, 0.0), 1.0 - rank / n)
+                    break
+            if hit:
+                break
+    return out
+
+
+def _build_trending_movies():
+    now = time.time()
+    added = _added()
+    with STORE_LOCK:
+        recs = [r for r in SHOWS.values() if r["movie"] and _kind(r["name"]) == "anime"]
+    rk = [(r["slug"], _mv_key(r["name"])) for r in recs]
+    tr = _al_movie_match(rk, _al["mtrend"], 100.0)
+    pop = _al_movie_match(rk, _al["mpop"], 100.0)
+    steps = ((24 * 30, 1.0), (24 * 90, 0.6), (24 * 180, 0.3))
+    ranked, rest = [], []
+    for r in recs:
+        sl = r["slug"]
+        rating = _rating_of(sl)
+        s = (0.40 * tr.get(sl, 0) + 0.25 * pop.get(sl, 0)
+             + 0.15 * _fresh_w(added.get(sl, 0), now, steps) + 0.20 * min(1.0, rating / 10.0))
+        if "Hindi" not in _show_langs(r):
+            s *= 0.7
+        # real signal = AniList knows it; the rest only tops the list up
+        if tr.get(sl) or pop.get(sl):
+            ranked.append((s, sl))
+        elif rating >= 6.8:
+            rest.append((s, sl))
+    ranked.sort(key=lambda x: -x[0])
+    rest.sort(key=lambda x: -x[0])
+    out = [sl for _s, sl in ranked]
+    if len(out) < 20:                       # too few signals: top up with the best-rated movies
+        out += [sl for _s, sl in rest][:20 - len(out)]
+    return out[:TREND_N["movies"]]
+
+
+def _trend_load_db():
+    for w, c in _trend_cache.items():
+        try:
+            raw = accounts.kv_get("trend_" + w)
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, list) and not c["t"]:      # not rebuilt yet
+                    c["data"] = data
+                    c["h"] = _h(data)
+        except Exception as e:
+            print("[trend] restore failed:", w, repr(e), flush=True)
+
+
+def _trend_rebuild(window):
+    """Rebuild one list; save to the DB only when it actually changed.  -> changed?"""
+    c = _trend_cache[window]
+    data = _build_trending_movies() if window == "movies" else _build_trending(window)
+    nh = _h(data)
+    changed = nh != c["h"]
+    c.update(t=time.time(), data=data, h=nh)
+    if changed:
+        _kv_put("trend_" + window, json.dumps(data, separators=(",", ":")))
+    return changed
 
 
 def _trending(window="week"):
@@ -2290,11 +2560,10 @@ def _trending(window="week"):
 
         def _run():
             try:
-                data = _build_trending(window)
-                c.update(t=time.time(), data=data)
+                _trend_rebuild(window)
                 if not _al["ok"]:
                     applog.log_once("tr-noal", 900, "warn", "trend",
-                                    f"{window}: AniList not loaded yet - using own signals only ({len(data)})")
+                                    f"{window}: AniList not loaded yet - using own signals only ({len(c['data'])})")
             except Exception as e:
                 applog.log_once("tr-fail-" + window, 300, "error", "trend",
                                 f"{window} build failed: {e!r}")
@@ -2305,7 +2574,8 @@ def _trending(window="week"):
     return list(c["data"])
 
 
-_upd_cache = {"t": 0, "data": {}}
+# ------------------------------------------- first-seen / episode tracking ---
+_upd_cache = {"t": 0, "data": {}, "added": {}}
 
 
 def _updates():
@@ -2317,11 +2587,30 @@ def _updates():
     return _upd_cache["data"]
 
 
+def _added():
+    """slug -> unix time the show first appeared (Recently added)."""
+    _updates()
+    return _upd_cache["added"]
+
+
+def _poster_ts(rec):
+    """Old shows: upload month of the poster image ~ when the hub was created."""
+    m = re.search(r"/uploads/(\d{4})/(\d{2})/", rec.get("poster") or "")
+    if not m:
+        return 0
+    try:
+        import calendar
+        return calendar.timegm((int(m.group(1)), int(m.group(2)), 15, 0, 0, 0))
+    except Exception:
+        return 0
+
+
 def _updates_refresh():
     now = time.time()
     try:
         with STORE_LOCK:
             counts = {slug: len(rec["eps"]) for slug, rec in SHOWS.items()}
+            posters = {slug: _poster_ts(rec) for slug, rec in SHOWS.items()}
         raw = accounts.kv_get("ep_counts")
         old = json.loads(raw) if raw else None
         new, dirty = {}, old is None
@@ -2335,7 +2624,20 @@ def _updates_refresh():
                 new[slug] = [o[0], o[1]]
         if dirty:
             accounts.kv_set("ep_counts", json.dumps(new, separators=(",", ":")))
-        _upd_cache.update(t=now, data={k: v[1] for k, v in new.items()})
+        # first-seen time per show (kept in the DB, so it survives restarts)
+        araw = accounts.kv_get("added_at")
+        aold = json.loads(araw) if araw else None
+        added, adirty = {}, aold is None
+        for slug in counts:
+            o = (aold or {}).get(slug)
+            if o is None:
+                added[slug] = posters.get(slug, 0) if aold is None else int(now)
+                adirty = True
+            else:
+                added[slug] = o
+        if adirty:
+            accounts.kv_set("added_at", json.dumps(added, separators=(",", ":")))
+        _upd_cache.update(t=now, data={k: v[1] for k, v in new.items()}, added=added)
     except Exception as e:
         applog.log_once("upd-track", 300, "error", "app", f"updates tracking failed: {e}")
         _upd_cache["t"] = now - 540      # retry in ~1 minute
@@ -3261,6 +3563,11 @@ def _auto_refresh():
     if gap <= 0:
         return
     last = {}
+    try:
+        last = {k: float(v) for k, v in json.loads(accounts.kv_get("auto_last") or "{}").items()}
+    except Exception:
+        last = {}
+    saved_at = time.time()
     time.sleep(60)
     while True:
         try:
@@ -3271,6 +3578,9 @@ def _auto_refresh():
                 last[slug] = time.time()
                 rec = SHOWS[slug]
                 _absorb_live(rec, _live_rows(rec))
+            if time.time() - saved_at > 600:            # remember the round across restarts
+                saved_at = time.time()
+                _kv_put("auto_last", json.dumps({k: int(v) for k, v in last.items() if k in SHOWS}))
         except Exception as e:
             print("[rt2] auto refresh:", e, flush=True)
         time.sleep(gap)
@@ -3289,6 +3599,83 @@ def _reload_catalog():
         missing = [r for r in SHOWS.values() if not r.get("poster")]
     for rec in missing:
         _bg_once(("poster", rec["slug"]), lambda rec=rec: _fetch_poster(rec))
+    try:
+        _catalog_delta_save()
+    except Exception as e:
+        applog.log_once("cat-save", 300, "error", "app", f"catalog backup to DB failed: {e!r}")
+
+
+# ---- catalog backup in the database ---------------------------------------
+# episodes_index.jsonl lives on the container disk, which is wiped by every
+# restart/redeploy.  Everything the site refresh discovered AFTER the shipped
+# file (new shows, updated hubs) is therefore also saved in the DB (compressed,
+# in chunks) and merged back at boot - so a restart never has to crawl it again.
+_CAT_CHUNK = 150000
+_cat_saved = {"h": ""}
+
+
+def _catalog_delta_save():
+    changed_hubs = {}
+    for r in ROWS:
+        k = _hub_key(r)
+        changed_hubs.setdefault(k, []).append(r)
+    cur = _hub_hashes(ROWS)
+    delta = [r for k, rows in changed_hubs.items() if cur.get(k) != BASE_HUBS.get(k) for r in rows]
+    blob = base64.b64encode(zlib.compress(json.dumps(delta, ensure_ascii=False,
+                                                     separators=(",", ":")).encode("utf-8"), 9)).decode("ascii")
+    h = hashlib.md5((BASE_SIG + blob).encode("ascii")).hexdigest()
+    if h == _cat_saved["h"]:
+        return                                   # nothing new since the last save
+    parts = [blob[i:i + _CAT_CHUNK] for i in range(0, len(blob), _CAT_CHUNK)] or [""]
+    for i, part in enumerate(parts):
+        accounts.kv_set("cat_delta_%d" % i, part)
+    accounts.kv_set("cat_delta_meta", json.dumps({"n": len(parts), "base": BASE_SIG, "h": h,
+                                                  "rows": len(delta), "t": time.time()}))
+    _cat_saved["h"] = h
+    print(f"[rt2] catalog backup saved to DB: {len(delta)} rows in {len(parts)} part(s)", flush=True)
+
+
+def _catalog_delta_apply():
+    """Boot: merge the saved delta into ROWS (and the file on disk, so the
+    refresher sees those hubs as already known)."""
+    global ROWS
+    try:
+        meta = json.loads(accounts.kv_get("cat_delta_meta") or "null")
+        if not meta:
+            return 0
+        blob = "".join(accounts.kv_get("cat_delta_%d" % i) or "" for i in range(int(meta["n"])))
+        if hashlib.md5((meta["base"] + blob).encode("ascii")).hexdigest() != meta["h"]:
+            print("[rt2] catalog backup in DB is damaged - ignored", flush=True)
+            return 0
+        delta = json.loads(zlib.decompress(base64.b64decode(blob)).decode("utf-8"))
+    except Exception as e:
+        print("[rt2] catalog backup restore failed:", repr(e), flush=True)
+        return 0
+    if not delta:
+        _cat_saved["h"] = meta.get("h", "")
+        return 0
+    same_base = meta.get("base") == BASE_SIG
+    dh = {_hub_key(r) for r in delta}
+    if same_base:
+        keep = [r for r in ROWS if _hub_key(r) not in dh]      # the DB copy is newer
+        merged = keep + delta
+    else:                                                       # new deploy: shipped data wins,
+        merged = ROWS + [r for r in delta if _hub_key(r) not in BASE_HUBS]   # only add unknown hubs
+    ROWS = merged
+    try:
+        path = os.path.join(BASE_DIR, "episodes_index.jsonl")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for r in ROWS:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+    except OSError as e:
+        print("[rt2] could not rewrite episodes_index.jsonl:", e, flush=True)
+    with STORE_LOCK:
+        _build_shows()
+    _cat_saved["h"] = meta.get("h", "") if same_base else ""
+    print(f"[rt2] catalog restored from DB: {len(delta)} rows ({'same' if same_base else 'new'} deploy)", flush=True)
+    return len(delta)
 
 
 def _fresh_tick(feed_pages):
@@ -3342,15 +3729,17 @@ def _fresh_tick(feed_pages):
 def _fresh_watch():
     """Every FRESH_SECONDS (default 10 min) pull newly posted episodes and
     shows from the site feed."""
-    gap = float(os.environ.get("FRESH_SECONDS", "600"))
+    gap = float(os.environ.get("FRESH_SECONDS", "3600"))
     pages = int(os.environ.get("FRESH_FEED_PAGES", "2"))
     if gap <= 0:
         return
-    time.sleep(45)
+    # restart-safe: if the last check was less than `gap` ago, wait out the rest
+    time.sleep(max(45.0, gap - (time.time() - _kv_float("t_fresh"))))
     while True:
         t0 = time.time()
         try:
             _fresh_tick(pages)
+            _kv_put("t_fresh", time.time())
         except Exception as e:
             print("[rt2] fresh watch failed:", repr(e), flush=True)
         time.sleep(max(30.0, gap - (time.time() - t0)))
@@ -3371,18 +3760,17 @@ def _catalog_refresh():
         that are weeks/months old and simply never got crawled in the
         first place (the original gap, not just a freshness gap) get
         picked up too. Slower, so it runs less often."""
-    gap = float(os.environ.get("CATALOG_REFRESH_SECONDS", str(6 * 3600)))
+    gap = float(os.environ.get("CATALOG_REFRESH_SECONDS", "3600"))
     full_gap = float(os.environ.get("CATALOG_FULL_REFRESH_SECONDS", str(24 * 3600)))
     if gap <= 0:
         return
-    time.sleep(120)
-    last_full = 0.0
-    first = True
+    # restart-safe: the last run (and the last FULL walk) are remembered in the DB
+    time.sleep(max(120.0, gap - (time.time() - _kv_float("t_catalog"))))
+    last_full = _kv_float("t_catalog_full")
     while True:
         try:
             import refresh_index
-            do_full = full_gap > 0 and (first or time.time() - last_full >= full_gap)
-            first = False
+            do_full = full_gap > 0 and time.time() - last_full >= full_gap
             if do_full:
                 last_full = time.time()
             before = len(SHOWS)
@@ -3390,6 +3778,9 @@ def _catalog_refresh():
                 summary = refresh_index.run(quiet=True, full=do_full)
                 _reload_catalog()
             added = len(SHOWS) - before
+            _kv_put("t_catalog", time.time())
+            if do_full:
+                _kv_put("t_catalog_full", last_full)
             if added or summary:
                 print(f"[rt2] catalog refresh ({'full' if do_full else 'recent'}): "
                       f"+{added} new shows", flush=True)
@@ -3398,15 +3789,99 @@ def _catalog_refresh():
         time.sleep(gap)
 
 
-def main():
+def _sync_once():
+    """Look at AniList + our own data; rebuild the lists.  Only when something
+    really changed is it saved and the website payload rebuilt."""
+    changed = _al_refresh()
+    for w in ("week", "day", "movies"):
+        try:
+            changed = _trend_rebuild(w) or changed
+        except Exception as e:
+            applog.log_once("sync-" + w, 300, "error", "trend", f"hourly rebuild {w} failed: {e!r}")
+    before = (_shows_cache["raw"] or b"")
+    try:
+        _updates_refresh()
+        raw = json.dumps(_api_shows_build(), ensure_ascii=False).encode("utf-8")
+        if raw != before:
+            _shows_cache.update(raw=raw, gz=gzip.compress(raw, 6), t=time.time())
+            changed = True
+    except Exception as e:
+        applog.log_once("sync-build", 300, "error", "app", f"hourly payload build failed: {e!r}")
+    print(f"[sync] hourly check done - {'lists updated' if changed else 'no change, nothing touched'}", flush=True)
+    return changed
+
+
+def _hourly_sync():
+    """Every SYNC_SECONDS (1 h): refresh the lists; resumes the clock after a
+    restart (no fetch at all when the last sync was less than an hour ago)."""
+    if SYNC_SECONDS <= 0:
+        return
+    time.sleep(max(60.0, SYNC_SECONDS - (time.time() - _kv_float("sync_t"))))
+    while True:
+        t0 = time.time()
+        try:
+            _sync_once()
+            _kv_put("sync_t", time.time())
+        except Exception as e:
+            print("[sync] failed:", repr(e), flush=True)
+        time.sleep(max(60.0, SYNC_SECONDS - (time.time() - t0)))
+
+
+def _boot_from_db():
+    """Everything the last run saved: catalog, AniList, trending lists."""
+    try:
+        _catalog_delta_apply()
+    except Exception as e:
+        print("[rt2] catalog restore failed:", repr(e), flush=True)
+    _al_load_db()
+    _trend_load_db()
+    _shows_cache["t"] = 0            # rebuild the website list with the restored data
+
+
+def _restore_from_db():
+    """The SQL service may be asleep.  The site starts at once on the shipped
+    data; this keeps knocking until the DB answers, then reads the last saved
+    state back.  Updates happen after that, in their own time."""
+    delay = 5
+    while True:
+        try:
+            accounts.kv_get("al_meta")               # probe: raises while the DB is unreachable
+            break
+        except Exception as e:
+            print(f"[rt2] DB not reachable yet (asleep?) - running on saved files, retry in {delay}s: {e!r}", flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 120)
+    _boot_from_db()
+    _DB_READY.set()
+    print("[rt2] state restored from DB", flush=True)
+
+
+def _startup():
+    """Restore everything saved in the DB FIRST, then start the workers - so
+    nothing is fetched again that the last run already has."""
+    threading.Thread(target=_restore_from_db, daemon=True).start()
     threading.Thread(target=_tmdb_boot, daemon=True).start()
+    _DB_READY.wait(300)              # cold DB: give it up to 5 min, then go on with the saved files
+    threading.Thread(target=_hourly_sync, daemon=True).start()
     threading.Thread(target=_auto_refresh, daemon=True).start()
     threading.Thread(target=_catalog_refresh, daemon=True).start()
     threading.Thread(target=_fresh_watch, daemon=True).start()
     threading.Thread(target=_tmdb_backfill, daemon=True).start()
     threading.Thread(target=shows_payload, daemon=True).start()   # warm /api/shows
     threading.Thread(target=_img_prewarm, daemon=True).start()    # posters -> disk
-    _updates(); _popular(); _trending("week"); _trending("day")   # warm the caches at boot
+    _updates(); _popular(); _trending("week"); _trending("day"); _trending("movies")   # warm the caches at boot
+
+    def _posters():
+        with STORE_LOCK:
+            missing = [r for r in SHOWS.values() if not r.get("poster")]
+        for rec in missing:
+            _fetch_poster(rec)
+            time.sleep(1)
+    threading.Thread(target=_posters, daemon=True).start()
+
+
+def main():
+    threading.Thread(target=_startup, daemon=True).start()        # port opens at once
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"[rt2] {ADDON_NAME} v{VERSION} | series={len(SERIES)} "
