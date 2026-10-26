@@ -5,6 +5,7 @@ SQLite file (for testing only; may be wiped on redeploy).
 Kept small: sessions expire after 1 year, 40 history rows max per user.
 """
 import hashlib, hmac, json, os, re, secrets, sqlite3, threading, time
+import urllib.error
 import urllib.request
 
 # Cloudflare (workers.dev) blocks the default "Python-urllib" User-Agent with 403 -> send a normal one
@@ -28,8 +29,14 @@ SCHEMA = [
  "CREATE TABLE IF NOT EXISTS favs(user_id INTEGER, slug TEXT, added REAL, PRIMARY KEY(user_id, slug))",
  "CREATE TABLE IF NOT EXISTS seen(user_id INTEGER, slug TEXT, eps TEXT, PRIMARY KEY(user_id, slug))",
  "CREATE TABLE IF NOT EXISTS tmdb(slug TEXT PRIMARY KEY, v TEXT)",
- "CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, lvl TEXT, src TEXT, msg TEXT)",
+ "CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY, ts REAL, lvl TEXT, src TEXT, msg TEXT)",
 ]
+
+def _body(e):
+    try:
+        return e.read().decode("utf-8", "replace")[:300]
+    except Exception:
+        return ""
 
 def _rows(resp):
     """Accept the common response shapes: {rows:[[..]]} or {rows:[{..}]}."""
@@ -53,8 +60,11 @@ def q(sql, params=()):
         _ready.wait(30)
         req = urllib.request.Request(SQL_URL, json.dumps({"sql": sql, "params": list(params)}).encode(),
                                      _HDR)
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return _rows(json.loads(r.read() or b"{}"))
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return _rows(json.loads(r.read() or b"{}"))
+        except urllib.error.HTTPError as e:
+            raise RuntimeError("SQL HTTP %s: %s" % (e.code, _body(e))) from None
     with _lock:
         if _local is None:
             _local = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -64,8 +74,22 @@ def q(sql, params=()):
 
 def init():
     if SQL_URL:
-        body = json.dumps({"script": ";\n".join(SCHEMA)}).encode()
-        urllib.request.urlopen(urllib.request.Request(SQL_URL, body, _HDR), timeout=15).read()
+        try:
+            body = json.dumps({"script": ";\n".join(SCHEMA)}).encode()
+            urllib.request.urlopen(urllib.request.Request(SQL_URL, body, _HDR), timeout=15).read()
+        except Exception as e:
+            why = "HTTP %s: %s" % (e.code, _body(e)) if isinstance(e, urllib.error.HTTPError) else repr(e)
+            print("[accounts] schema script failed (%s) - creating tables one by one" % why, flush=True)
+            bad = []
+            for st in SCHEMA:                      # one broken statement must not block the rest
+                try:
+                    b = json.dumps({"sql": st, "params": []}).encode()
+                    urllib.request.urlopen(urllib.request.Request(SQL_URL, b, _HDR), timeout=15).read()
+                except Exception as e2:
+                    w2 = "HTTP %s: %s" % (e2.code, _body(e2)) if isinstance(e2, urllib.error.HTTPError) else repr(e2)
+                    bad.append(st[:60] + " -> " + w2)
+            if bad:
+                raise RuntimeError("; ".join(bad))
     else:
         for s in SCHEMA:
             q(s)
@@ -76,6 +100,13 @@ def _init_bg():
         init()
     except Exception as e:
         print("[accounts] init failed:", e, flush=True)
+        _ready.set()
+        time.sleep(20)                   # one more try: the SQL service may have been waking up
+        try:
+            init()
+            print("[accounts] init ok on retry", flush=True)
+        except Exception as e2:
+            print("[accounts] init failed again:", e2, flush=True)
     finally:
         _ready.set()
 

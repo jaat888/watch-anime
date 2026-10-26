@@ -55,6 +55,7 @@
         <div class="row wrapx" style="margin-top:8px">
           <button class="ghost" id="lref">Refresh</button>
           <button class="ghost" id="lmore">Older</button>
+          <button class="ghost" id="lcopy">Copy</button>
           <label class="mut"><input type="checkbox" id="lauto" style="width:auto"> auto (5s)</label>
           <button class="red" id="lclr" style="margin-left:auto">Clear</button>
         </div>
@@ -174,6 +175,20 @@ function tab(t) {
 }
 $("tUsers").onclick = () => tab("u"); $("tLogs").onclick = () => tab("l");
 $("lref").onclick = () => loadLogs().catch(lerr);
+$("lcopy").onclick = async () => {
+  const txt = LOGS.map(r => `${lt(r.ts)} [${r.src}] ${r.lvl.toUpperCase()}: ${r.msg}`).join("\n");
+  if (!txt) { say($("lstat"), "Nothing to copy", "err"); return; }
+  let ok = false;
+  try { await navigator.clipboard.writeText(txt); ok = true; } catch(e) {}
+  if (!ok) {
+    const ta = document.createElement("textarea");
+    ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand("copy"); } catch(e) {}
+    ta.remove();
+  }
+  say($("lstat"), ok ? "Copied " + LOGS.length + " lines" : "Copy failed - select the text manually", ok ? "ok" : "err");
+};
 $("lmore").onclick = () => loadLogs(true).catch(lerr);
 $("lvl").onchange = $("src").onchange = () => loadLogs().catch(lerr);
 $("ltext").onkeydown = e => { if (e.key === "Enter") loadLogs().catch(lerr); };
