@@ -579,6 +579,29 @@ html:not(.lite) .hero .in2>*{animation:none}
 .tgl i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:transform .2s}
 .tgl.on{background:var(--accent)}.tgl.on i{transform:translateX(20px)}
 .acout{width:100%;height:48px;border-radius:999px;font-weight:700}
+
+/* ===== v6: sharp full-bleed hero, landscape genre tiles, tighter gaps ===== */
+.hero.land .bg{display:none}
+.hero.land .art{display:block;position:absolute;inset:0;left:0;top:0;width:100%;height:100%;max-width:none;max-height:none;transform:none;border-radius:0;object-fit:cover;object-position:center 25%;box-shadow:none;filter:saturate(1.08) contrast(1.03)}
+.hero:not(.land) .art{object-fit:contain}
+.gtr{grid-auto-columns:min(250px,70vw)!important}
+.gtile{aspect-ratio:16/9;border-radius:16px}
+.gtile::after{background:linear-gradient(180deg,transparent 35%,rgba(0,0,0,.82))}
+.gtile .gtl{left:14px;bottom:10px}
+.gtile .gtl b{font-size:18px}
+.rail .card{content-visibility:visible}
+@media(max-width:759px){
+h2.sec{margin:14px 0 8px}
+.rail{padding-bottom:0;margin-bottom:0}
+.card .t{padding:7px 2px 0}
+.hero:not(.dh) .seg{margin:10px 0 0}
+.t10 .n{margin-bottom:26px}
+}
+
+/* episode rows without thumbnails: number tile + thin progress strip */
+.ep.epc{overflow:hidden}
+.epc .en{flex:0 0 46px;height:46px}
+.epbar{position:absolute;left:0;bottom:0;height:3px;background:var(--accent);border-radius:0 3px 3px 0}
 </style>
 </head>
 <body>
@@ -882,7 +905,7 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
       h("div",{class:"row2"},play,fav,shr))))];
   if(mem.length>1)kids.push(h("div",{class:"lbl",style:"margin-top:18px"},"Seasons"),h("div",{class:"chips"},mem.map((x,k)=>h("button",{class:"chip","aria-pressed":String(x.slug===slug),onclick:()=>{if(x.slug!==slug)go("#/show/"+x.slug)}},seasonLabel(x,k)))));
   if(!s.movie){const pp=epProgAll(slug),se={};vids.forEach(v=>(se[v.season]=se[v.season]||[]).push(v));
-    for(const n of Object.keys(se).sort((a,b)=>a-b))kids.push(h("h2",{class:"sec"},"Season "+n),h("div",{class:"eps epl"},se[n].map(v=>h("button",{"data-k":v.season+":"+v.episode,class:"ep epc"+(last&&last.season==v.season&&last.episode==v.episode?" cur":""),title:v.title||"",onclick:()=>go("#/watch/"+slug+"/"+v.season+"/"+v.episode)},h("span",{class:"eth",style:s.poster?"background-image:url("+s.poster+")":""},h("b",{},String(v.episode)),pp[v.season+":"+v.episode]>0?h("i",{style:"width:"+Math.min(100,pp[v.season+":"+v.episode])+"%"}):null),h("span",{class:"ec"},h("span",{class:"et"},epTitle(v)||"Episode "+v.episode),h("span",{class:"es"},"Season "+v.season+" \u00b7 Episode "+v.episode+(pp[v.season+":"+v.episode]>=95?" \u00b7 \u2713 Watched":pp[v.season+":"+v.episode]>0?" \u00b7 "+pp[v.season+":"+v.episode]+"% watched":""))),h("span",{class:"eg"},"\u25B6")))));
+    for(const n of Object.keys(se).sort((a,b)=>a-b))kids.push(h("h2",{class:"sec"},"Season "+n),h("div",{class:"eps epl"},se[n].map(v=>h("button",{"data-k":v.season+":"+v.episode,class:"ep epc"+(last&&last.season==v.season&&last.episode==v.episode?" cur":""),title:v.title||"",onclick:()=>go("#/watch/"+slug+"/"+v.season+"/"+v.episode)},h("span",{class:"en"},String(v.episode)),h("span",{class:"ec"},h("span",{class:"et"},epTitle(v)||"Episode "+v.episode),h("span",{class:"es"},"Season "+v.season+" \u00b7 Episode "+v.episode+(pp[v.season+":"+v.episode]>=95?" \u00b7 \u2713 Watched":pp[v.season+":"+v.episode]>0?" \u00b7 "+pp[v.season+":"+v.episode]+"% watched":""))),h("span",{class:"eg"},"\u25B6"),pp[v.season+":"+v.episode]>0?h("i",{class:"epbar",style:"width:"+Math.min(100,pp[v.season+":"+v.episode])+"%"}):null))));
     if(!vids.length)kids.push(h("p",{class:"muted"},"No episodes found."))}
   kids.push(...rail("More like this",similar(s,20)));
   $app.replaceChildren(...kids);
