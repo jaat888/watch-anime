@@ -27,12 +27,20 @@ import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-import requests
-
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 import crawler as C          # noqa: E402
 import parse_hubs as P       # noqa: E402
+
+def _get(url, timeout=30):
+    """GET through the crawler's browser-impersonating session (Cloudflare)."""
+    return C.get_session().get(url, headers=UA, timeout=timeout)
+
+
+def _cf(r):
+    t = (r.text or "")[:3000].lower()
+    return "just a moment" in t or "cf-chl" in t
+
 
 SITE = "https://www.rareanimes.mov"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -60,9 +68,11 @@ def collect_targets(feed_pages, full=False, max_pages=400):
     all get picked up too (one-time/periodic backfill, slower)."""
     cand, feed = set(), []
     for page in range(1, feed_pages + 1):
-        r = requests.get(f"{SITE}/feed/?paged={page}", headers=UA, timeout=30)
+        r = _get(f"{SITE}/feed/?paged={page}")
         items = re.findall(r"<item>(.*?)</item>", r.text, re.S)
         if not items:
+            print(f"[index] RSS feed page {page}: no items (HTTP {r.status_code}"
+                  f"{', Cloudflare challenge' if _cf(r) else ''})", flush=True)
             break
         for it in items:
             l = re.search(r"<link>(.*?)</link>", it, re.S)
@@ -73,16 +83,17 @@ def collect_targets(feed_pages, full=False, max_pages=400):
     _py, _pm = (_t.tm_year, _t.tm_mon - 1) if _t.tm_mon > 1 else (_t.tm_year - 1, 12)
     for listing in ("/home/", f"/{_py}/{_pm:02d}/", time.strftime("/%Y/%m/")):
         try:
-            r = requests.get(SITE + listing, headers=UA, timeout=30)
+            r = _get(SITE + listing)
             cand |= set(re.findall(r'href="' + SITE + r'(/hindi/[^"]+?)/?"', r.text))
-        except requests.RequestException:
-            pass
+        except Exception as e:
+            print(f"[index] listing {listing} failed: {e!r}", flush=True)
     if full:
         for page in range(1, max_pages + 1):
             url = f"{SITE}/hindi/" if page == 1 else f"{SITE}/hindi/page/{page}/"
             try:
-                r = requests.get(url, headers=UA, timeout=30)
-            except requests.RequestException:
+                r = _get(url)
+            except Exception as e:
+                print(f"[index] archive page {page} failed: {e!r}", flush=True)
                 break
             if r.status_code == 404:
                 break
@@ -204,11 +215,11 @@ def run(feed_pages=12, quiet=False, full=False):
         for r in final:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    log(f"[crawl] hubs={len(new_hubs)} ep-rows={len(new_rows)} "
-        f"store-rows={len(new_store_rows)} fails={len(fails)} "
-        f"({time.time()-t0:.0f}s)")
+    print(f"[index] hubs={len(new_hubs)} ep-rows={len(new_rows)} "
+          f"store-rows={len(new_store_rows)} fails={len(fails)} "
+          f"({time.time()-t0:.0f}s)", flush=True)
     for f_ in fails[:10]:
-        log("   FAIL:", f_)
+        print("[index] FAIL:", f_, flush=True)
     log(f"[merge] hub_pages={len(streams['hub_pages'])} "
         f"episode_streams={len(streams['episode_streams'])}")
     log(f"[merge] index rows {len(old_idx)} -> {len(final)} "

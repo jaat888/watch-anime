@@ -127,17 +127,28 @@ session_local = threading.local()
 
 
 def get_session():
+    """Browser-impersonating session (curl_cffi) so Cloudflare does not block
+    the crawler; falls back to plain requests when curl_cffi is missing."""
     if not hasattr(session_local, "s"):
-        s = requests.Session()
-        s.headers.update({
+        hdrs = {
             "User-Agent": UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-        })
-        s.mount("https://", requests.adapters.HTTPAdapter(
-            max_retries=3, pool_maxsize=16))
+        }
+        try:
+            from curl_cffi import requests as creq
+            s = creq.Session(impersonate="chrome")
+            s.headers.update(hdrs)
+        except Exception:
+            s = requests.Session()
+            s.headers.update(hdrs)
+            s.mount("https://", requests.adapters.HTTPAdapter(
+                max_retries=3, pool_maxsize=16))
         session_local.s = s
     return session_local.s
+
+
+_bad_http = {"n": 0}
 
 
 def fetch(url, referer=None):
@@ -155,8 +166,13 @@ def fetch(url, referer=None):
             if r.status_code in (429, 503):
                 time.sleep(5 * (attempt + 1))
                 continue
+            if r.status_code != 404 and _bad_http["n"] < 20:     # 404 is normal; the rest is worth seeing
+                _bad_http["n"] += 1
+                body = (r.text or "")[:3000].lower()
+                cf = " (Cloudflare challenge)" if ("just a moment" in body or "cf-chl" in body) else ""
+                print(f"[crawl] HTTP {r.status_code}{cf} for {url}", flush=True)
             return None, final
-        except requests.RequestException:
+        except Exception as e:
             time.sleep(2 * (attempt + 1))
     with lock:
         errors.append({"url": url, "error": "failed after retries"})

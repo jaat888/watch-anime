@@ -28,6 +28,7 @@ SCHEMA = [
  "CREATE TABLE IF NOT EXISTS favs(user_id INTEGER, slug TEXT, added REAL, PRIMARY KEY(user_id, slug))",
  "CREATE TABLE IF NOT EXISTS seen(user_id INTEGER, slug TEXT, eps TEXT, PRIMARY KEY(user_id, slug))",
  "CREATE TABLE IF NOT EXISTS tmdb(slug TEXT PRIMARY KEY, v TEXT)",
+ "CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, lvl TEXT, src TEXT, msg TEXT)",
 ]
 
 def _rows(resp):
@@ -240,6 +241,12 @@ def change_password(uid, token, old, new):
     q("UPDATE users SET salt=?, pw=? WHERE id=?", (salt, _hash(new, salt), uid))
     q("DELETE FROM sessions WHERE user_id=? AND token<>?", (uid, _th(token)))  # sign out other devices
     return None
+
+def recent_watch(since, limit=300):
+    """slug -> number of distinct users who watched it since `since` (unix time)."""
+    return {r[0]: int(r[1]) for r in q(
+        "SELECT slug, COUNT(DISTINCT user_id) FROM progress WHERE updated>? "
+        "GROUP BY slug ORDER BY 2 DESC LIMIT ?", (float(since), int(limit)))}
 
 def popular(limit=20):
     return [r[0] for r in q("SELECT slug FROM progress GROUP BY slug ORDER BY COUNT(*) DESC, MAX(updated) DESC LIMIT ?", (limit,))]

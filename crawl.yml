@@ -1,0 +1,39 @@
+name: Refresh episodes index
+
+on:
+  workflow_dispatch:        # manually "Run workflow" button se chala sakte ho
+  schedule:
+    - cron: "0 */12 * * *"   # har 12 ghante (naye episode jaldi aayein)
+
+permissions:
+  contents: write           # repo me push karne ke liye zaroori
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90      # crawler lambi chal sakti hai, safe margin
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 lxml curl_cffi
+
+      - name: Refresh episodes_index.jsonl (new shows + new episodes)
+        run: python refresh_index.py 12 --full
+
+      - name: Commit and push updated files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add episodes_index.jsonl
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Auto-refresh streams.json + episodes_index.jsonl"
+          git push

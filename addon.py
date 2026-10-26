@@ -57,6 +57,8 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlparse, parse_qs, unquote, urljoin
 
+import applog
+applog.install()          # keep every printed line + crashes in the SQL `logs` table
 import accounts
 import genres as G
 import requests
@@ -255,6 +257,15 @@ def _build_shows():
         if r not in lst:                 # rebuild-safe: no duplicate rows
             lst.append(r)
     for rec in SHOWS.values():
+        # season-less hubs (Hagemaru, Luckyman, Monster Kid, AoT OAD ...) have
+        # many episodes under season 0: that is a SERIES (as season 1), not a
+        # movie - otherwise their new episodes never show up.  Real movies
+        # have a single (0, n) entry.
+        if rec["eps"] and all((k[0] or 0) == 0 for k in rec["eps"]) and len(rec["eps"]) > 1:
+            rec["eps"] = {(1, k[1]): v for k, v in rec["eps"].items()}
+            for rows in rec["eps"].values():
+                for r in rows:
+                    r["season"] = 1
         rec["movie"] = all((k[0] or 0) == 0 for k in rec["eps"]) if rec["eps"] else False
         rec["poster"] = rec["poster"] or POSTERS.get(rec["site_name"], "")
         rec["genres"] = _TMDB_CACHE.get(rec["slug"], {}).get("g", [])
@@ -278,6 +289,12 @@ def upstream_get(url, referer=None, timeout=RESOLVE_TIMEOUT):
         headers["Referer"] = referer
     return creq.get(url, headers=headers, timeout=timeout,
                     allow_redirects=True, impersonate="chrome")
+
+
+def _cf_blocked(text):
+    """True when the body is a Cloudflare challenge page instead of the site."""
+    t = (text or "")[:6000].lower()
+    return "just a moment" in t or "cf-chl" in t or "attention required! | cloudflare" in t
 
 
 def upstream_stream(url, referer=None, rng=None, timeout=30):
@@ -704,7 +721,13 @@ def _live_rows(rec):
             return hit[1]
     rows = []
     try:
-        page = upstream_get(hub, referer=SITE).text or ""
+        _resp = upstream_get(hub, referer=SITE)
+        page = _resp.text or ""
+        if _resp.status_code != 200 or _cf_blocked(page):
+            applog.log_once("live-" + str(_resp.status_code), 300, "error", "live",
+                            f"hub fetch blocked/failed HTTP {_resp.status_code}"
+                            f"{' (Cloudflare challenge)' if _cf_blocked(page) else ''}: {hub}")
+            page = ""
         if rec.get("movie"):
             # every zipper with its button label, in document order;
             # language = the nearest preceding <h4> heading ("Hindi -
@@ -835,8 +858,12 @@ def _live_rows(rec):
                                  "sb": r.get("sb") or ""})
             except Exception as e:
                 print("[live] bs4 parse failed:", e, flush=True)
-    except Exception:
+    except Exception as e:
+        applog.log_once("live-exc-" + type(e).__name__, 300, "error", "live",
+                        f"hub parse failed {hub}: {e!r}")
         rows = []
+    if not rows and rec.get("hub"):
+        applog.log_once("live-empty-" + hub, 3600, "warn", "live", f"no episodes parsed from {hub}")
     with _live_lock:
         _live_cache[hub] = (now + (LIVE_TTL if rows else LIVE_NEG), rows)
     return rows
@@ -2087,134 +2114,194 @@ def _popular():
     return _pop_cache["data"]
 
 
-# ------------------------------------------- TMDB daily/weekly trending ---
-# TMDB trending (day + week; tv + movies; many pages) matched by title
-# against the shows we actually have (exact + fuzzy), then filled with
-# TMDB's most-popular Japanese animation.  Cached 1 h per window; failures
-# keep the last good list.
+# --------------------------------------- AniList + own-signal trending ---
+# India/Hindi-first trending, anime only (no cartoons, no movies of other
+# kinds unless AniList itself lists them).  Signals, per window (day/week):
+#   * AniList TRENDING_DESC rank           (what anime fans watch right now)
+#   * AniList airing-now POPULARITY rank   (only shows that are on air)
+#   * new episode on OUR site recently     (Hindi dub that just dropped)
+#   * distinct users who watched it on our site in the window
+# Only shows that exist on our site WITH Hindi are eligible; one entry per
+# franchise (newest season).  A half-loaded AniList answer is never cached:
+# the last complete one stays and the failure goes to the log.
 TREND_TTL = _env_int("TREND_TTL", 600)
-TREND_PAGES = _env_int("TREND_PAGES", 15)         # 20 titles per page per kind
-_trend_cache = {w: {"t": 0, "data": [], "busy": False} for w in ("day", "week")}
+AL_TTL = _env_int("ANILIST_TTL", 1800)
+AL_URL = "https://graphql.anilist.co"
+_AL_Q = ("query($p:Int,$sort:[MediaSort]%s){Page(page:$p,perPage:50){media(type:ANIME,sort:$sort%s,"
+         "countryOfOrigin:JP,isAdult:false){id title{romaji english native} synonyms format status "
+         "trending popularity}}}")
+_al = {"t": 0.0, "ok": 0.0, "trend": [], "air": [], "busy": False, "err": ""}
+_trend_cache = {w: {"t": 0.0, "data": [], "busy": False} for w in ("day", "week")}
 
 
 def _tn_norm(s):
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
-def _tn_index():
-    with STORE_LOCK:
-        idx = {}
-        for rec in SHOWS.values():
-            for nm in (rec.get("name"), _tmdb_clean(rec.get("name"))):
-                k = _tn_norm(nm)
-                if k:
-                    lst = idx.setdefault(k, [])
-                    if rec["slug"] not in lst:
-                        lst.append(rec["slug"])
-    return idx
+def _fr_key(name):
+    """Franchise key: season / part / dub words removed ('AoT Season 2 (Hindi Dub)' -> 'aot')."""
+    return _tn_norm(_tmdb_clean(name))
 
 
-def _tn_match(idx, keys, item):
-    """Slugs for one TMDB item: exact title first, then prefix/containment
-    (e.g. 'Attack on Titan' <-> 'Attack on Titan The Final Season')."""
-    names = [item.get(k) for k in ("name", "original_name", "title", "original_title")]
-    hit = []
-    for nm in names:
-        for slug in idx.get(_tn_norm(nm), []):
-            if slug not in hit:
-                hit.append(slug)
-    if hit:
-        return hit
-    for nm in names:
-        t = _tn_norm(nm)
-        if len(t) < 6:
-            continue
-        for k in keys:
-            if len(k) < 6:
-                continue
-            short, long_ = (t, k) if len(t) <= len(k) else (k, t)
-            if long_.startswith(short) and len(short) / len(long_) >= 0.55:
-                for slug in idx[k]:
-                    if slug not in hit:
-                        hit.append(slug)
-    return hit
+def _al_page(sort, page, status=None):
+    var = {"p": page, "sort": [sort]}
+    if status:
+        var["st"] = status
+    q = _AL_Q % (",$st:MediaStatus" if status else "", ",status:$st" if status else "")
+    r = creq.post(AL_URL, json={"query": q, "variables": var},
+                  headers={"User-Agent": UA, "Accept": "application/json"},
+                  timeout=20, impersonate="chrome")
+    if r.status_code != 200:
+        raise RuntimeError(f"anilist HTTP {r.status_code} {(r.text or '')[:120]!r}")
+    j = r.json()
+    if j.get("errors"):
+        raise RuntimeError("anilist error " + str(j["errors"])[:160])
+    return ((j.get("data") or {}).get("Page") or {}).get("media") or []
 
 
-_disc_cache = {"t": 0, "data": []}
-
-
-def _tmdb_discover_anime():
-    if _disc_cache["data"] and time.time() - _disc_cache["t"] < TREND_TTL:
-        return _disc_cache["data"]
+def _al_list(sort, pages, status=None):
     out = []
-    for kind in ("tv", "movie"):
-        for page in range(1, 7):
-            try:
-                out += _tmdb_get(f"/discover/{kind}", with_genres=16,
-                                 with_original_language="ja",
-                                 sort_by="popularity.desc", page=page).get("results") or []
-            except Exception as e:
-                print(f"[rt2] tmdb discover {kind} p{page} failed: {repr(e)}", flush=True)
-    if out:
-        _disc_cache.update(t=time.time(), data=out)
-    return out or _disc_cache["data"]
-
-
-def _tmdb_trending_slugs(window):
-    """-> [slug, ...] ordered by TMDB trending rank (best first)."""
-    idx = _tn_index()
-    keys = list(idx)
-    out, seen = [], set()
-
-    def take(item):
-        for slug in _tn_match(idx, keys, item):
-            if slug not in seen:
-                seen.add(slug)
-                out.append(slug)
-
-    ok = False
-    pages = TREND_PAGES if window == "week" else max(8, TREND_PAGES // 2)
-    for page in range(1, pages + 1):
-        for kind in ("tv", "movie"):
-            try:
-                res = _tmdb_get(f"/trending/{kind}/{window}", page=page).get("results") or []
-            except Exception as e:
-                print(f"[rt2] tmdb trending {kind}/{window} p{page} failed: {repr(e)}", flush=True)
-                continue
-            ok = ok or bool(res)
-            anim = [r for r in res if 16 in (r.get("genre_ids") or [])]
-            for r in anim + [r for r in res if r not in anim]:
-                take(r)
-    # fill: most popular Japanese animation on TMDB right now (shared by day+week)
-    for r in _tmdb_discover_anime():
-        ok = True
-        take(r)
-    if not ok:
-        raise RuntimeError("tmdb trending unavailable")
+    for p in range(1, pages + 1):
+        res = _al_page(sort, p, status)
+        if not res:
+            raise RuntimeError(f"anilist {sort} page {p} empty")
+        out += res
+        time.sleep(0.7)               # AniList allows ~90 req/min
     return out
 
 
+def _al_titles(m):
+    t = m.get("title") or {}
+    names = [t.get("romaji"), t.get("english"), t.get("native")] + list(m.get("synonyms") or [])
+    ks = []
+    for n in names:
+        k = _fr_key(n)
+        if len(k) >= 4 and k not in ks:
+            ks.append(k)
+    return ks
+
+
+def _al_refresh():
+    """Reload both AniList lists.  All-or-nothing."""
+    try:
+        trend = _al_list("TRENDING_DESC", 3)
+        air = _al_list("POPULARITY_DESC", 2, status="RELEASING")
+    except Exception as e:
+        _al["err"] = repr(e)[:200]
+        _al["t"] = time.time() - AL_TTL + 300         # retry in 5 min
+        applog.log_once("al-fail", 600, "error", "trend",
+                        f"AniList refresh failed (keeping last good list, "
+                        f"{len(_al['trend'])} titles): {_al['err']}")
+        return False
+    _al.update(trend=trend, air=air, t=time.time(), ok=time.time(), err="")
+    print(f"[trend] AniList ok: {len(trend)} trending, {len(air)} airing", flush=True)
+    return True
+
+
+def _al_ensure():
+    if time.time() - _al["t"] > AL_TTL and not _al["busy"]:
+        _al["busy"] = True
+
+        def _run():
+            try:
+                _al_refresh()
+            finally:
+                _al["busy"] = False
+        threading.Thread(target=_run, daemon=True).start()
+
+
+def _season_no(name):
+    m = re.search(r"season\s*(\d+)|(\d+)(?:st|nd|rd|th)\s+season", name or "", re.I)
+    return int(m.group(1) or m.group(2)) if m else 1
+
+
+def _build_trending(window):
+    """-> ordered [slug,...], best first.  Pure in-memory + one small SQL query."""
+    now = time.time()
+    span = 86400 if window == "day" else 7 * 86400
+    try:
+        watch = accounts.recent_watch(now - span)
+    except Exception as e:
+        applog.log_once("tw-fail", 600, "warn", "trend", f"watch-count query failed: {e!r}")
+        watch = {}
+    upd = _updates()
+    with STORE_LOCK:
+        recs = [r for r in SHOWS.values()
+                if _kind(r["name"]) == "anime" and "Hindi" in _show_langs(r)]
+    fam = {}                                   # franchise key -> [rec]
+    for r in recs:
+        fam.setdefault(_fr_key(r["name"]), []).append(r)
+    keys = list(fam)
+
+    def fam_for(k):
+        if k in fam:
+            return fam[k]
+        if len(k) >= 8:                        # strict prefix, never loose fuzzy
+            for fk in keys:
+                if len(fk) >= 8:
+                    s, l = (k, fk) if len(k) <= len(fk) else (fk, k)
+                    if l.startswith(s) and len(s) / len(l) >= 0.75:
+                        return fam[fk]
+        return None
+
+    score = {}                                 # franchise key -> {"a":..,"t":..}
+    for src, lst, n in (("t", _al["trend"], 150.0), ("a", _al["air"], 100.0)):
+        for rank, m in enumerate(lst):
+            for k in _al_titles(m):
+                f = fam_for(k)
+                if f:
+                    fk = _fr_key(f[0]["name"])
+                    d = score.setdefault(fk, {})
+                    d[src] = max(d.get(src, 0.0), 1.0 - rank / n)
+                    break
+    for fk, rs in fam.items():                 # own signals can add shows AniList missed
+        score.setdefault(fk, {})
+
+    def fresh(ts):
+        if not ts:
+            return 0.0
+        age = (now - ts) / 3600.0
+        steps = ((24, 1.0), (72, 0.6), (168, 0.3)) if window == "day" else ((72, 1.0), (168, 0.7), (336, 0.3))
+        return next((v for lim, v in steps if age <= lim), 0.0)
+
+    wt = (0.45, 0.15, 0.25, 0.15) if window == "day" else (0.30, 0.25, 0.25, 0.20)
+    ranked = []
+    for fk, d in score.items():
+        rs = fam[fk]
+        # one entry per franchise: newest season that has the freshest episode
+        best = max(rs, key=lambda r: (upd.get(r["slug"], 0) or 0, _season_no(r["name"]), len(r["eps"])))
+        fr = max(fresh(upd.get(r["slug"], 0)) for r in rs)
+        wc = sum(watch.get(r["slug"], 0) for r in rs)
+        s = (wt[0] * d.get("t", 0) + wt[1] * d.get("a", 0) + wt[2] * fr + wt[3] * min(1.0, wc / 5.0))
+        if s > 0:
+            ranked.append((s, best["slug"]))
+    ranked.sort(key=lambda x: -x[0])
+    return [slug for _s, slug in ranked[:60]]
+
+
 def _trending(window="week"):
-    """TMDB trending slugs first, then our own most-watched; never blocks."""
+    """Cached list for the website.  Never blocks; refreshes in background."""
+    _al_ensure()
     c = _trend_cache[window]
     if time.time() - c["t"] > TREND_TTL and not c["busy"]:
         c["busy"] = True
 
         def _run():
             try:
-                c.update(t=time.time(), data=_tmdb_trending_slugs(window))
+                data = _build_trending(window)
+                c.update(t=time.time(), data=data)
+                if not _al["ok"]:
+                    applog.log_once("tr-noal", 900, "warn", "trend",
+                                    f"{window}: AniList not loaded yet - using own signals only ({len(data)})")
             except Exception as e:
-                print(f"[rt2] trending {window} refresh failed: {repr(e)}", flush=True)
-                c["t"] = time.time() - TREND_TTL + 300   # retry in 5 min
+                applog.log_once("tr-fail-" + window, 300, "error", "trend",
+                                f"{window} build failed: {e!r}")
+                c["t"] = time.time() - TREND_TTL + 120
             finally:
                 c["busy"] = False
         threading.Thread(target=_run, daemon=True).start()
-    seen, out = set(), []
-    for slug in list(c["data"]) + list(_popular()):
-        if slug not in seen:
-            seen.add(slug)
-            out.append(slug)
-    return out
+    return list(c["data"])
+
 
 _upd_cache = {"t": 0, "data": {}}
 
@@ -2876,10 +2963,28 @@ class Handler(BaseHTTPRequestHandler):
         given = self.headers.get("X-Admin-Key") or ""
         if not key or not hmac.compare_digest(given.encode(), key.encode()):
             _admin_fails[ip] = (bad[0] + 1, time.time())
+            applog.log_once("adminfail:" + ip, 60, "warn", "admin", "wrong admin key from " + ip)
             return self._send({"error": "Wrong admin key."}, 403)
         _admin_fails.pop(ip, None)
         if path == "/api/admin/stats":
             return self._send(accounts.admin_stats())
+        if path == "/api/admin/logs":
+            def _i(v, d):
+                try:
+                    return int(v)
+                except Exception:
+                    return d
+            rows, origin = applog.query(limit=_i(b.get("limit"), 200), level=str(b.get("level") or "all"),
+                                        src=str(b.get("src") or "")[:24], text=str(b.get("text") or "")[:100],
+                                        before=_i(b.get("before"), 0))
+            return self._send({"rows": rows, "origin": origin, "sources": applog.sources(),
+                               "stats": applog.stats()})
+        if path == "/api/admin/logs/clear":
+            try:
+                applog.clear()
+            except Exception as e:
+                return self._send({"error": "clear failed: %s" % e}, 500)
+            return self._send({"ok": True})
         err = None
         if path == "/api/admin/password":
             err = accounts.admin_set_password(str(b.get("username", "")), str(b.get("password", "")))
@@ -3179,13 +3284,18 @@ def _fresh_tick(feed_pages):
     import refresh_index as RI
     links = []
     for page in range(1, feed_pages + 1):
-        r = requests.get(f"{SITE}feed/?paged={page}", headers={"User-Agent": UA},
-                         timeout=20)
+        r = upstream_get(f"{SITE}feed/?paged={page}", timeout=25)
+        if r.status_code != 200 or _cf_blocked(r.text):
+            applog.log_once("feed-blocked", 600, "error", "fresh",
+                            f"RSS feed page {page}: HTTP {r.status_code}"
+                            f"{' - Cloudflare challenge' if _cf_blocked(r.text) else ''}")
+            continue
         for it in re.findall(r"<item>(.*?)</item>", r.text or "", re.S):
             m = re.search(r"<link>(.*?)</link>", it, re.S)
             if m:
                 links.append(m.group(1).strip())
     if not links:
+        applog.log_once("feed-empty", 600, "warn", "fresh", "RSS feed returned no posts")
         return
     with STORE_LOCK:
         by_hub = {RI.strong(r["hub"]): r for r in SHOWS.values() if r.get("hub")}
@@ -3198,8 +3308,9 @@ def _fresh_tick(feed_pages):
             try:
                 _absorb_live(rec, _live_rows(rec))
                 touched += 1
-            except Exception:
-                pass
+            except Exception as e:
+                applog.log_once("fresh-absorb", 300, "error", "fresh",
+                                f"re-read failed for {rec.get('slug')}: {e!r}")
         elif RI.is_real_hub(u):
             unknown = True
     added = 0
