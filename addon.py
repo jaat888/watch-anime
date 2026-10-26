@@ -1836,7 +1836,7 @@ def handle_meta(mtype, mid):
                 vids.append({"id": f"raretoons2:{slug}:{s}:{e}",
                              "season": s, "episode": e,
                              "title": title, "name": title})
-        titles, pending = _ep_titles(rec, wait=4.0)
+        titles, pending = _ep_titles(rec, wait=1.0)
         for v in vids:
             t = titles.get(f"{v['season']}:{v['episode']}")
             if t:
@@ -2325,7 +2325,20 @@ def _img_mem(token, hit):
     _img_cache[token] = hit
 
 
+_img_fail = {}                       # token -> time of last failed upstream fetch
+_img_sem = threading.Semaphore(6)    # at most 6 poster fetches to the source at once
+
+
 def _img_load(token, url):
+    try:
+        return _img_load2(token, url)
+    except Exception as e:           # network/TLS/Cloudflare hiccup must never become a 500
+        _img_fail[token] = time.time()
+        print("[img] fetch failed:", token[:24], repr(e)[:120], flush=True)
+        return None
+
+
+def _img_load2(token, url):
     """memory -> disk -> upstream.  Returns (bytes, content_type) or None.
     Posters used to be re-fetched from the source site (TLS handshake +
     Cloudflare) every time the 400-entry memory cache rolled over - that
@@ -2343,13 +2356,16 @@ def _img_load(token, url):
             return hit
     except OSError:
         pass
-    with _walk_lock_for("img:" + token):          # one upstream fetch per image
+    if time.time() - _img_fail.get(token, 0) < 300:   # failed recently: don't hammer the source
+        return None
+    with _walk_lock_for("img:" + token), _img_sem:    # one upstream fetch per image
         hit = _img_cache.get(token)
         if hit:
             return hit
-        r = upstream_get(url, referer=SITE, timeout=15)
+        r = upstream_get(url, referer=SITE, timeout=10)
         ctype = r.headers.get("content-type") or ""
         if r.status_code != 200 or "image" not in ctype:
+            _img_fail[token] = time.time()
             return None
         hit = (r.content, ctype)
         try:
@@ -2364,7 +2380,10 @@ def _img_load(token, url):
 
 
 def _serve_img(handler, token, url=None):
-    url = url or _unseal(token)
+    try:
+        url = url or _unseal(token)
+    except Exception:
+        url = ""
     if not url.startswith("https://"):
         return handler._send({"error": "bad image"}, 400)
     hit = _img_load(token, url)
