@@ -192,7 +192,8 @@ def _tmdb_store(slug, info):
         print(f"[rt2] tmdb save failed for {slug}: {repr(e)}", flush=True)
 
 
-_tmdb_load_cache()
+# NOTE: the cache is now loaded in the background by _tmdb_boot() (started in main())
+# so the port opens at once and a cold SQL service cannot delay wake-up.
 
 
 def _migrate_genres():
@@ -215,7 +216,25 @@ def _migrate_genres():
         print(f"[rt2] genres saved for {n} shows", flush=True)
 
 
-threading.Thread(target=_migrate_genres, daemon=True).start()
+def _tmdb_boot():
+    """Background boot: load the whole tmdb table, fill genres/desc/rating into
+    the already-built SHOWS, then run the one-time genre migration."""
+    global _TMDB_CACHE
+    try:
+        loaded = accounts.tmdb_all()
+    except Exception as e:
+        print(f"[rt2] tmdb cache load failed: {repr(e)}", flush=True)
+        loaded = {}
+    with _tmdb_lock:
+        loaded.update(_TMDB_CACHE)       # anything saved meanwhile wins
+        _TMDB_CACHE = loaded
+    with STORE_LOCK:
+        for rec in SHOWS.values():
+            c = _TMDB_CACHE.get(rec["slug"]) or {}
+            rec["genres"] = c.get("g", [])
+            rec["desc"] = c.get("d", "")
+            rec["rating"] = c.get("r")
+    _migrate_genres()
 
 
 def _build_shows():
@@ -3255,6 +3274,7 @@ def _catalog_refresh():
 
 
 def main():
+    threading.Thread(target=_tmdb_boot, daemon=True).start()
     threading.Thread(target=_auto_refresh, daemon=True).start()
     threading.Thread(target=_catalog_refresh, daemon=True).start()
     threading.Thread(target=_fresh_watch, daemon=True).start()

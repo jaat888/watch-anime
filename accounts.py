@@ -49,6 +49,7 @@ def q(sql, params=()):
     """Run one statement, return list of row tuples."""
     global _local
     if SQL_URL:
+        _ready.wait(30)
         req = urllib.request.Request(SQL_URL, json.dumps({"sql": sql, "params": list(params)}).encode(),
                                      _HDR)
         with urllib.request.urlopen(req, timeout=15) as r:
@@ -67,10 +68,22 @@ def init():
     else:
         for s in SCHEMA:
             q(s)
-try:
-    init()
-except Exception as e:
-    print("[accounts] init failed:", e, flush=True)
+_ready = threading.Event()   # set when the schema step is finished
+
+def _init_bg():
+    try:
+        init()
+    except Exception as e:
+        print("[accounts] init failed:", e, flush=True)
+    finally:
+        _ready.set()
+
+if SQL_URL:
+    # remote SQL can be slow/cold: do it in the background so the server opens its port at once;
+    # q() waits for it (max 30 s) before the first query
+    threading.Thread(target=_init_bg, daemon=True).start()
+else:
+    _init_bg()
 
 def _hash(pw, salt):
     return hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), 200_000).hex()
