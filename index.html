@@ -423,6 +423,54 @@ header,.nav{backdrop-filter:none!important;-webkit-backdrop-filter:none!importan
 img.poster{content-visibility:auto}
 html:not(.lite) #app>*:not(.rail){animation-duration:.18s!important}
 html:not(.lite) .rail>*{animation:none!important}
+/* ===== PC (wide screens): Apple TV style cards, 2-column show page, centred player ===== */
+@media(min-width:760px){
+.card{background:none!important;border:0!important;box-shadow:none!important;overflow:visible;border-radius:0}
+.card .pw{border-radius:16px;box-shadow:0 10px 26px rgba(0,0,0,.35)}
+.card .t{padding:10px 2px 0;font-size:14.5px;font-weight:600;color:var(--text)}
+h2.sec{font-size:24px;margin:34px 0 14px;padding-left:0}h2.sec::before{display:none}
+.rail{gap:18px}.grid{gap:22px 18px}
+.hero:not(.dh) .hban{border-radius:26px;box-shadow:none;border:0}
+.hero:not(.dh) .pri,.hero:not(.dh) .glass,.hero.dh .row2 .pri,.hero.dh .row2 .glass{border-radius:999px}
+}
+@media(min-width:900px){
+.rail{grid-auto-columns:clamp(260px,19vw,340px)}
+.t10r{grid-auto-columns:clamp(300px,24vw,380px)}
+.hero.dh{display:grid;grid-template-columns:minmax(320px,42%) 1fr;gap:36px;align-items:start}
+.hero.dh .hban{aspect-ratio:16/10}
+.hero.dh .hin{padding:6px 0 0}
+.hero.dh h1{font-size:clamp(32px,3.2vw,46px)}
+.hero.dh .hd,.hero.dh .hd:not(.open){-webkit-line-clamp:5;font-size:15.5px}
+.eps.epl{grid-template-columns:repeat(2,1fr);gap:12px}
+#app>.back,#app>h2:not(.sec),.player,.nextbar,.cbar,.panel.slim,.epbox{max-width:1000px;margin-left:auto;margin-right:auto}
+.player{width:100%}
+.cbar{margin-top:16px}.crow{grid-template-columns:1fr 1fr}
+.seekgrp{max-width:420px}
+}
+@media(min-width:1500px){.eps.epl{grid-template-columns:repeat(3,1fr)}.rail{grid-auto-columns:clamp(280px,17vw,360px)}}
+@media(hover:hover){.card:hover .pw{transform:translateY(-4px);box-shadow:0 16px 36px var(--glow,rgba(0,0,0,.5))}.card .pw{transition:transform .2s,box-shadow .2s}}
+
+/* ===== TV (html.tv, remote control): big text, safe margins, clear focus ring ===== */
+html.tv{font-size:20px}
+html.tv header{padding:16px 56px}
+html.tv main{max-width:none;padding-left:56px;padding-right:56px}
+html.tv .logo{font-size:30px}
+html.tv .ib,html.tv .spill{height:56px}html.tv .ib{width:56px}html.tv .spill{font-size:18px}
+html.tv h2.sec{font-size:30px;margin:38px 0 16px}
+html.tv .rail{grid-auto-columns:clamp(300px,21vw,420px);gap:24px;padding-top:16px;padding-bottom:26px}
+html.tv .card .t{font-size:18px;padding-top:12px}
+html.tv .card:focus,html.tv .ep:focus,html.tv .sr:focus{transform:none;box-shadow:none;outline:0}
+html.tv .card .pw{transition:transform .15s}
+html.tv .card:focus .pw{transform:scale(1.07);outline:5px solid var(--accent);outline-offset:4px;box-shadow:0 18px 40px rgba(0,0,0,.6)}
+html.tv .hero:not(.dh) .hban{aspect-ratio:21/8;max-height:46vh}
+html.tv .hero h1{font-size:46px}
+html.tv .hero .hd{font-size:19px}
+html.tv .pri,html.tv .glass,html.tv .btn,html.tv .chip{min-height:56px;font-size:19px;padding-left:28px;padding-right:28px}
+html.tv .epc .et{font-size:19px}html.tv .epc .es{font-size:14px}html.tv .epc .eth{flex-basis:160px}
+html.tv .ep:focus{outline:4px solid var(--accent);outline-offset:3px;background:color-mix(in srgb,var(--accent) 14%,var(--panel))}
+html.tv .nav{padding:8px 24px}html.tv .nav button{font-size:16px;padding:8px 0}html.tv .nav svg{width:30px;height:30px}
+html.tv .sb{font-size:17px;height:52px}html.tv .csel select{height:52px;font-size:17px}
+html.tv .nextbar .pv,html.tv .nextbar .nx{height:58px;font-size:19px}
 /* --- watch (player) screen, Apple TV style --- */
 .player{border-radius:20px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
 .cbar{background:none;border:0;padding:0;gap:12px;margin-top:14px}
