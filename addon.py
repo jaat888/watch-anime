@@ -191,7 +191,7 @@ def _tmdb_store(slug, info):
     try:
         accounts.tmdb_set(slug, info)
     except Exception as e:
-        print(f"[rt2] tmdb save failed for {slug}: {repr(e)}", flush=True)
+        applog.log_once("tmdb-save", 300, "error", "app", f"tmdb save failed (last: {slug}): {e!r}")
 
 
 # NOTE: the cache is now loaded in the background by _tmdb_boot() (started in main())
@@ -1097,7 +1097,8 @@ def _tmdb_lookup(name, is_movie, anime=True):
             mal = G.jikan_lookup(_tmdb_clean(name), is_movie)
         except Exception as e:
             jf = 1
-            print(f"[rt2] jikan lookup FAILED for '{name}': {repr(e)}", flush=True)
+            applog.log_once("jikan-" + type(e).__name__, 600, "error", "jikan",
+                            f"jikan lookup failed (e.g. '{name}'): {str(e)[-160:]}  - same error is hidden for 10 min")
     if not results and not mal:
         info = {"v": 3, "g": [], "d": "", "r": None, "t": time.time(), "nf": 1}
         if jf:
@@ -1136,7 +1137,8 @@ def _tmdb_refresh(rec):
                             anime=_kind(nm) == "anime")
     except Exception as e:
         _TMDB_FAIL[slug] = time.time()
-        print(f"[rt2] tmdb lookup FAILED for '{slug}': {repr(e)}", flush=True)
+        applog.log_once("tmdb-" + type(e).__name__, 600, "error", "tmdb",
+                        f"tmdb lookup failed (e.g. '{slug}'): {str(e)[-160:]}  - same error is hidden for 10 min")
         return False
     _TMDB_FAIL.pop(slug, None)
     _tmdb_store(slug, info)
@@ -2335,7 +2337,7 @@ def _updates_refresh():
             accounts.kv_set("ep_counts", json.dumps(new, separators=(",", ":")))
         _upd_cache.update(t=now, data={k: v[1] for k, v in new.items()})
     except Exception as e:
-        print("[rt2] updates tracking failed:", e, flush=True)
+        applog.log_once("upd-track", 300, "error", "app", f"updates tracking failed: {e}")
         _upd_cache["t"] = now - 540      # retry in ~1 minute
     finally:
         _upd_cache["busy"] = False
@@ -2967,7 +2969,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"error": "Wrong admin key."}, 403)
         _admin_fails.pop(ip, None)
         if path == "/api/admin/stats":
-            return self._send(accounts.admin_stats())
+            try:
+                return self._send(accounts.admin_stats())
+            except Exception as e:     # database down/damaged: still answer, so the panel can show the repair buttons
+                return self._send({"total": 0, "users": [], "error": str(e), "sql": accounts.sql_state()})
+        if path == "/api/admin/db":
+            act = str(b.get("action") or "info")
+            if act not in ("info", "check", "sync", "discard"):
+                return self._send({"error": "unknown action"}, 400)
+            if act == "discard" and b.get("confirm") is not True:
+                return self._send({"error": "send confirm:true to reload the database from Telegram"}, 400)
+            res = accounts.db_admin(act)
+            applog.info("admin", f"db {act}: {json.dumps(res, default=str)[:300]}")
+            return self._send(res, 400 if res.get("error") else 200)
         if path == "/api/admin/logs":
             def _i(v, d):
                 try:

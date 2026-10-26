@@ -29,8 +29,8 @@ import traceback
 
 KEEP_ROWS = int(os.environ.get("LOG_KEEP") or 5000)
 MAX_MSG = 700
-FLUSH_EVERY = 4.0
-BATCH_ROWS = 20          # 4 bound params per row -> 80 params (under 100: safe for D1-style limits)
+FLUSH_EVERY = 10.0
+BATCH_ROWS = 50          # 4 bound params per row -> 200 params per statement (real SQLite in the Worker allows far more)
 MAX_PENDING = 3000
 PRUNE_EVERY = 600.0
 
@@ -131,12 +131,14 @@ def flush(max_rows=200):
             return 0
         import accounts
         try:
+            stmts = []
             for i in range(0, len(batch), BATCH_ROWS):
                 part = batch[i:i + BATCH_ROWS]
                 sql = ("INSERT INTO logs(ts,lvl,src,msg) VALUES "
                        + ",".join(["(?,?,?,?)"] * len(part)))
-                accounts.q(sql, [v for row in part for v in row])
-                saved += len(part)
+                stmts.append((sql, [v for row in part for v in row]))
+            accounts.qb(stmts)                         # ONE request / one transaction for the whole batch
+            saved = len(batch)
         except Exception as e:
             with _lock:                                # put the unsaved rows back
                 _pending[:0] = batch[saved:]
@@ -173,7 +175,7 @@ def _loop():
     while True:
         try:
             n = flush()
-            wait = FLUSH_EVERY if _stats["last_db_error"] == "" else 20.0
+            wait = FLUSH_EVERY if _stats["last_db_error"] == "" else 60.0
             if n >= 200:                # backlog: go again quickly
                 wait = 0.5
         except Exception:
@@ -259,6 +261,11 @@ _WARN_RE = re.compile(r"warn|timeout|timed out|retry|blocked|expired|challenge|\
 _SRC_RE = re.compile(r"^\[([A-Za-z0-9_\-]+)\]\s*(.*)$")
 
 
+_ACCESS_RE = re.compile(r'^"?(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH) (\S+) HTTP/[\d.]+"? (\d{3})\b')
+# lines we do not store in SQL at all: they are only traffic noise (every poster, every admin refresh)
+_NOISY_PATH = re.compile(r"^/(img/|app\.webmanifest|favicon|sw\.js|api/admin/(stats|logs)\b)")
+
+
 def _from_stream(line, default_lvl):
     line = line.strip()
     if not line or re.fullmatch(r"-{10,}", line):
@@ -267,6 +274,15 @@ def _from_stream(line, default_lvl):
     src, msg = (m.group(1), m.group(2)) if m else ("app", line)
     if src == "rt2":
         src = "app"
+    a = _ACCESS_RE.match(msg)
+    if a:                                   # http.server access line -> its own source, level from the status code
+        path, code = a.group(2), int(a.group(3))
+        if code < 400 and _NOISY_PATH.match(path):
+            return
+        if code < 400 and path in ("/", "/healthz", "/health") and code == 200:
+            return                          # uptime pings
+        log("error" if code >= 500 else "warn" if code >= 400 else "info", "http", msg, console=False)
+        return
     lvl = "error" if _ERR_RE.search(msg) else ("warn" if _WARN_RE.search(msg) else default_lvl)
     log(lvl, src, msg, console=False)       # already printed by the real stream
 

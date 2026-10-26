@@ -72,6 +72,16 @@
       </div>
     </div>
     <div class="card">
+      <div class="card" id="dbcard">
+        <div class="mut">Database (tgstore worker)</div>
+        <div id="dbst" class="msg" style="margin:6px 0">-</div>
+        <div class="row wrapx">
+          <button class="ghost" id="dbchk">Check</button>
+          <button class="ghost" id="dbsync">Backup now</button>
+          <button class="red" id="dbdisc">Reload from Telegram</button>
+        </div>
+        <div class="mut" style="margin-top:6px">"database disk image is malformed" = the file inside the worker is damaged. Try <b>Reload from Telegram</b> (goes back to the last backup; changes after it are lost).</div>
+      </div>
       <input id="search" placeholder="Search username...">
       <div id="msg" class="msg"></div>
       <div class="tw"><table>
@@ -119,7 +129,20 @@ function render() {
 async function load() {
   const j = await api("/api/admin/stats");
   USERS = j.users; $("total").textContent = j.total; render();
+  if (j.error) say($("dbst"), "SQL error: " + j.error, "err");
+  else say($("dbst"), "SQL ok", "ok");
 }
+async function dbAct(action, confirmIt) {
+  const el = $("dbst"); say(el, "working...", "");
+  try {
+    const j = await api("/api/admin/db", {action, confirm: confirmIt === true});
+    say(el, JSON.stringify(j).slice(0, 600), "ok");
+    if (action === "discard") setTimeout(() => load().catch(() => {}), 3000);
+  } catch (e) { say(el, e.message, "err"); }
+}
+$("dbchk").onclick = () => dbAct("check");
+$("dbsync").onclick = () => dbAct("sync");
+$("dbdisc").onclick = () => { if (confirm("Reload the database from the last Telegram backup? Newer changes are lost.")) dbAct("discard", true); };
 async function login() {
   KEY = $("key").value.trim() || KEY;
   try {
