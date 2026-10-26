@@ -2158,6 +2158,9 @@ def _api_shows_build():
         if it["poster"].startswith("https://"):
             it["poster"] = "/img/s/" + it["slug"]      # short link; hides the source site
     top_rated, top_movies, recent, recent_movies = _derived_lists(items)
+    for it in items:
+        if it["slug"] in _EN:
+            it["en"] = _EN[it["slug"]]
     items.sort(key=lambda x: x["name"].lower())
     return {"shows": items, "now": int(time.time()), "popular": _popular(),
             "trending": _trending("week"),
@@ -2165,6 +2168,42 @@ def _api_shows_build():
             "trending_movies": _trending("movies"),
             "top_rated": top_rated, "top_movies": top_movies,
             "recent": recent, "recent_movies": recent_movies}
+
+
+def _al_top(rows, is_movie, rated, limit):
+    """Top Rated like AniList's own list (score order) but only what we carry
+    WITH Hindi; one entry per franchise (its first season, the rest sit behind
+    the season picker).  The shortfall is topped up with our own best-rated."""
+    keyf = _mv_key if is_movie else _fr_key
+    hi = [it for it in rows if "Hindi" in (it.get("langs") or [])]
+    fam = {}
+    for it in hi:
+        fam.setdefault(keyf(it["name"]), []).append(it)
+    lst = _al["mtop" if is_movie else "top"]
+    out, seen = [], set()
+    if lst and fam:
+        for fk, _sc, m in _match_al_list(lst, _fam_matcher(list(fam)), 100.0):
+            its = fam[fk]
+            rep_ = min(its, key=lambda it: (_season_no(it["name"]), it["ord"]))
+            if rep_["slug"] in seen:
+                continue
+            seen.add(rep_["slug"])
+            if m.get("sc"):
+                rep_["rating"] = round(m["sc"] / 10.0, 1)      # AniList score, same 0-10 scale
+            _note_en(rep_["name"], rep_["slug"], m)
+            out.append(rep_["slug"])
+            if len(out) >= limit:
+                return out
+    done = {keyf(it["name"]) for it in rows if it["slug"] in seen}
+    for it in rated(hi) + rated(rows):                       # top-up: Hindi first, then the rest
+        k = keyf(it["name"])
+        if k in done:
+            continue
+        done.add(k)
+        out.append(it["slug"])
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _derived_lists(items):
@@ -2188,8 +2227,8 @@ def _derived_lists(items):
     mov = [it for it in ok if it["movie"]]
     rated = lambda rows: sorted((it for it in rows if it.get("rating")),
                                 key=lambda it: (-float(it["rating"]), -it["n"], it["ord"]))
-    top_rated = pick(rated(ser), lambda it: _fr_key(it["name"]), TOP_RATED_N)
-    top_movies = pick(rated(mov), lambda it: _mv_key(it["name"]), TOP_MOVIES_N)
+    top_rated = _al_top(ser, False, rated, TOP_RATED_N)
+    top_movies = _al_top(mov, True, rated, TOP_MOVIES_N)
     newest = lambda rows: sorted(rows, key=lambda it: (-it["add"], -it["ord"]))
     recent = pick(newest(ser), lambda it: _fr_key(it["name"]), RECENT_N)
     recent_movies = pick(newest(mov), lambda it: _mv_key(it["name"]), RECENT_N)
@@ -2428,6 +2467,7 @@ TOP_MOVIES_N = _env_int("TOP_MOVIES_N", 40)
 RECENT_N = _env_int("RECENT_N", 40)
 AL_URL = "https://graphql.anilist.co"
 _al = {"t": 0.0, "ok": 0.0, "trend": [], "air": [], "mtrend": [], "mpop": [],
+       "top": [], "mtop": [],
        "busy": False, "err": "", "h": ""}
 _trend_cache = {w: {"t": 0.0, "data": [], "busy": False, "h": ""}
                 for w in ("day", "week", "movies")}
@@ -2482,7 +2522,8 @@ def _mv_key(name):
 def _al_slim(m):
     t = m.get("title") or {}
     return {"i": m.get("id"), "t": [t.get("romaji"), t.get("english"), t.get("native")],
-            "s": list(m.get("synonyms") or [])[:6], "f": m.get("format")}
+            "s": list(m.get("synonyms") or [])[:6], "f": m.get("format"),
+            "sc": m.get("averageScore") or 0}
 
 
 def _al_page(sort, page, status=None, fmt=None):
@@ -2497,7 +2538,7 @@ def _al_page(sort, page, status=None, fmt=None):
         decl += ",$fm:MediaFormat"
         args += ",format:$fm"
     q = ("query(%s){Page(page:$p,perPage:50){media(%s){id title{romaji english native} "
-         "synonyms format status trending popularity}}}" % (decl, args))
+         "synonyms format status trending popularity averageScore}}}" % (decl, args))
     r = creq.post(AL_URL, json={"query": q, "variables": var},
                   headers={"User-Agent": UA, "Accept": "application/json"},
                   timeout=20, impersonate="chrome")
@@ -2540,7 +2581,7 @@ def _al_load_db():
             t_db = float(meta.get("t") or 0)
             if t_db <= _al["t"]:
                 return                           # already fetched something newer meanwhile
-            _al.update({k: d.get(k) or [] for k in ("trend", "air", "mtrend", "mpop")})
+            _al.update({k: d.get(k) or [] for k in ("trend", "air", "mtrend", "mpop", "top", "mtop")})
             _al["h"] = meta.get("h") or _h(d)
             _al["t"] = t_db
             _al["ok"] = _al["t"]
@@ -2557,7 +2598,10 @@ def _al_refresh():
         d = {"trend": _al_list("TRENDING_DESC", 3),
              "air": _al_list("POPULARITY_DESC", 2, status="RELEASING"),
              "mtrend": _al_list("TRENDING_DESC", 2, fmt="MOVIE"),
-             "mpop": _al_list("POPULARITY_DESC", 2, fmt="MOVIE")}
+             "mpop": _al_list("POPULARITY_DESC", 2, fmt="MOVIE"),
+             # AniList "Top Rated" = score order (TV series / movies kept apart, like our site)
+             "top": _al_list("SCORE_DESC", 4, fmt="TV"),
+             "mtop": _al_list("SCORE_DESC", 2, fmt="MOVIE")}
     except Exception as e:
         _al["err"] = repr(e)[:200]
         _al["t"] = time.time() - AL_TTL + 300         # retry in 5 min
@@ -2617,6 +2661,59 @@ def _fresh_w(ts, now, steps):
     return next((v for lim, v in steps if age <= lim), 0.0)
 
 
+_EN = {}          # slug -> English title from AniList (only where the site name is not English)
+
+
+def _note_en(rec_name, slug, m):
+    """Remember AniList's English title when the site's own name is romaji/mixed."""
+    try:
+        en = ((m.get("t") or [None, None])[1] or "").strip()
+        if not en:
+            return
+        site = _tn_norm(_tmdb_clean(rec_name))
+        base = _tn_norm(en)
+        if not base or base in site or site in base:
+            return                                   # site name already says it in English
+        sn = _season_no(rec_name)
+        if sn > 1 and not re.search(r"season\s*\d|\d(?:st|nd|rd|th)\s+season|part\s*\d", en, re.I):
+            en += f" Season {sn}"
+        _EN[slug] = en
+    except Exception:
+        pass
+
+
+def _match_al_list(lst, fam_for, n):
+    """AniList list (in AniList's own order) -> [(franchise key, rank score 0..1, entry)],
+    each franchise once, at its best AniList position."""
+    seen, out = set(), []
+    for rank, m in enumerate(lst):
+        for k in _al_titles(m):
+            fk = fam_for(k)
+            if fk:
+                if fk not in seen:
+                    seen.add(fk)
+                    out.append((fk, 1.0 - rank / n, m))
+                break
+    return out
+
+
+def _fam_matcher(keys):
+    ks = set(keys)
+    klist = list(keys)
+
+    def fam_for(k):
+        if k in ks:
+            return k
+        if len(k) >= 8:                        # strict prefix, never loose fuzzy
+            for fk in klist:
+                if len(fk) >= 8:
+                    s_, l_ = (k, fk) if len(k) <= len(fk) else (fk, k)
+                    if l_.startswith(s_) and len(s_) / len(l_) >= 0.75:
+                        return fk
+        return None
+    return fam_for
+
+
 def _build_trending(window):
     """-> ordered [slug,...], best first.  SERIES only (movies have their own list)."""
     now = time.time()
@@ -2655,13 +2752,17 @@ def _build_trending(window):
                 fk = fam_for(k)
                 if fk:
                     d = score.setdefault(fk, {})
-                    d[src] = max(d.get(src, 0.0), 1.0 - rank / n)
+                    if 1.0 - rank / n > d.get(src, 0.0):
+                        d[src] = 1.0 - rank / n
+                        if src == "t":
+                            d["m"] = m
                     break
     for fk in fam:                             # own signals can add shows AniList missed
         score.setdefault(fk, {})
 
     steps = ((24, 1.0), (72, 0.6), (168, 0.3)) if window == "day" else ((72, 1.0), (168, 0.7), (336, 0.3))
-    wt = (0.45, 0.15, 0.25, 0.15) if window == "day" else (0.30, 0.25, 0.25, 0.20)
+    # AniList's own "Trending Now" order leads; our site signals only nudge it
+    wt = (0.50, 0.10, 0.25, 0.15) if window == "day" else (0.55, 0.15, 0.15, 0.15)
     ranked, rest = [], []
     for fk, d in score.items():
         rs = fam[fk]
@@ -2670,6 +2771,10 @@ def _build_trending(window):
         fr = max(_fresh_w(upd.get(r["slug"], 0), now, steps) for r in rs)
         wc = sum(watch.get(r["slug"], 0) for r in rs)
         s = (wt[0] * d.get("t", 0) + wt[1] * d.get("a", 0) + wt[2] * fr + wt[3] * min(1.0, wc / 5.0))
+        if d.get("t") or d.get("a"):
+            m_ = d.get("m")
+            if m_:
+                _note_en(best["name"], best["slug"], m_)
         if s > 0:
             ranked.append((s, best["slug"]))
         else:

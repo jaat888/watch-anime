@@ -525,6 +525,8 @@ setInterval(()=>{if(!document.hidden)refreshShows()},3600000);
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&Date.now()-lastSync>3600000)refreshShows()});
 let SMAP=null;const bySlug=s=>{if(!SHOWS)return undefined;if(!SMAP||SMAP.size!==SHOWS.length)SMAP=new Map(SHOWS.map(x=>[x.slug,x]));return SMAP.get(s)};
 const isNew=s=>s.upd&&NOW-s.upd<7*86400;
+/* title shown to the user: AniList English title when the site name is romaji */
+const dn=s=>s.en||s.name;
 const epTitle=v=>{const t=v&&v.title?String(v.title).trim():"";return t&&!/^(?:episode|ep\.?)\s*\d*$/i.test(t)?t:""};
 async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<(c.p?8000:120000))return c.v;let v=[],pend=false;try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];pend=!!(m.meta&&m.meta.ept_pending);if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie)META[s.slug]={t:Date.now(),v,p:pend};else if(c)return c.v;return v}
 function posterEl(s){const w=h("div",{class:"pw"}),f=()=>h("div",{class:"ph"},(s.name[0]||"?").toUpperCase());if(!s.poster){w.append(f());w.classList.add("ok");return w}
@@ -555,7 +557,7 @@ const subOf=s=>((s.langs||[]).length?s.langs.slice(0,2).join(" · ")+" Dub":"Ani
 const ago=t=>{const d=Math.max(0,NOW-t);return d<3600?Math.max(1,Math.round(d/60))+"m ago":d<86400?Math.round(d/3600)+"h ago":Math.round(d/86400)+"d ago"};
 const epLink=s=>s.le?"#/watch/"+s.slug+"/"+s.le[0]+"/"+s.le[1]:"#/show/"+s.slug;
 function epCard(s){const nw=isNew(s);return h("button",{class:"card",onclick:()=>go(epLink(s))},thumb(s),nw?h("div",{class:"badge"},"NEW"):null,
-  s.le?h("div",{class:"t"},h("div",{class:"ept"},"S"+s.le[0]+" · E"+s.le[1],nw?h("span",{}," · "+ago(s.upd)):null),h("b",{},s.name)):h("div",{class:"t"},h("b",{},s.name),h("small",{},subOf(s))))}
+  s.le?h("div",{class:"t"},h("div",{class:"ept"},"S"+s.le[0]+" · E"+s.le[1],nw?h("span",{}," · "+ago(s.upd)):null),h("b",{},dn(s))):h("div",{class:"t"},h("b",{},dn(s)),h("small",{},subOf(s))))}
 const resumeLink=(s,p)=>"#/watch/"+s.slug+(s.movie?"":"/"+p.season+"/"+p.episode);
 const bgStyle=s=>s.poster?"background-image:url('"+s.poster.replace(/'/g,"%27")+"')":"";
 async function toggleFav(slug){if(!ME)return authModal();const on=!FAVS.includes(slug);try{await api("/api/fav",{slug,on});FAVS=on?[slug,...FAVS]:FAVS.filter(x=>x!==slug)}catch(e){}}
@@ -610,7 +612,7 @@ function heroEl(items){
     const art=s.poster?h("img",{class:"art",alt:"",referrerpolicy:"no-referrer",src:s.poster}):null,cur=i;
     if(art){const mk=()=>{if(cur===i&&art.naturalWidth>art.naturalHeight*1.2)box.classList.add("land")};art.onload=mk;art.onerror=()=>art.remove();if(art.complete&&art.naturalWidth)mk()}
     box.replaceChildren(...[h("div",{class:"hban"},h("div",{class:"bg",style:bgStyle(s)}),art,h("span",{class:"tag"},p?"Continue watching":nw&&s.le?"New episode · S"+s.le[0]+" E"+s.le[1]:"#"+(i+1)+" Trending")),
-      h("div",{class:"hin"},h("div",{class:"in2"},h("span",{class:"kick"},"Free · "+((s.langs||[]).length?s.langs.slice(0,3).join(" · ")+" Dub":"Anime")),h("h1",{},s.name),h("div",{class:"hinfo"},s.rating?h("span",{class:"hr"},"\u2605 "+(+s.rating).toFixed(1)):null,h("span",{},s.movie?"Movie":"Series"),!s.movie&&s.le?h("span",{},"Latest S"+s.le[0]+" E"+s.le[1]):null),(s.genres||[]).length?h("div",{class:"hg"},s.genres.slice(0,8).map(x=>h("span",{},x))):null,heroDesc(s,()=>{clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(tick,D)},box),
+      h("div",{class:"hin"},h("div",{class:"in2"},h("span",{class:"kick"},"Free · "+((s.langs||[]).length?s.langs.slice(0,3).join(" · ")+" Dub":"Anime")),h("h1",{},dn(s)),h("div",{class:"hinfo"},s.rating?h("span",{class:"hr"},"\u2605 "+(+s.rating).toFixed(1)):null,h("span",{},s.movie?"Movie":"Series"),!s.movie&&s.le?h("span",{},"Latest S"+s.le[0]+" E"+s.le[1]):null),(s.genres||[]).length?h("div",{class:"hg"},s.genres.slice(0,8).map(x=>h("span",{},x))):null,heroDesc(s,()=>{clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(tick,D)},box),
         h("div",{class:"row2"},h("button",{class:"pri",onclick:()=>go(p?resumeLink(s,p).slice(1):nw?epLink(s).slice(1):"#/show/"+s.slug)},p?"▶ Resume"+(s.movie?"":" S"+p.season+" E"+p.episode):"▶ Watch now"),h("button",{class:"glass",onclick:()=>go("#/show/"+s.slug)},"Details")),
         N>1?h("div",{class:"seg"},items.map((_,k)=>h("button",{"aria-label":"Slide "+(k+1),class:k<i?"done":k===i?"on":"",onclick:()=>to(k)},h("i",{style:k===i?"animation-duration:"+D+"ms":""})))):null))].filter(Boolean));
     clearTimeout(heroTimer);if(N>1)heroTimer=setTimeout(tick,D)}
@@ -708,7 +710,7 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
   const kids=[h("button",{class:"back",onclick:()=>history.length>1?history.back():go("#/")},"\u2190 Back"),
     h("div",{class:"hero dh"},h("div",{class:"hban"},posterEl(s)),h("div",{class:"hin"},h("div",{class:"in2"},
       h("span",{class:"kick"},"Free \u00b7 "+((s.langs||[]).length?s.langs.slice(0,3).join(" \u00b7 ")+" Dub":"Anime")),
-      h("h1",{},s.name),
+      h("h1",{},dn(s)),
       h("div",{class:"hinfo"},s.rating?h("span",{class:"hr"},"\u2605 "+(+s.rating).toFixed(1)):null,h("span",{},s.movie?"Movie":vids.length+" episodes"),last&&!s.movie?h("span",{},"Watching S"+last.season+" E"+last.episode):null),
       gl.length?h("div",{class:"hg"},gl.map(g=>h("span",{},g))):null,
       ds?h("p",{class:"hd open"},ds):null,
