@@ -2512,7 +2512,7 @@ def _img_path(token):
 
 def _img_mem(token, hit):
     try:
-        while len(_img_cache) > 40 or sum(len(v[0]) for v in list(_img_cache.values())) > 6 * 1024 * 1024:
+        while len(_img_cache) > 250 or sum(len(v[0]) for v in list(_img_cache.values())) > 24 * 1024 * 1024:
             _img_cache.pop(next(iter(_img_cache)), None)
     except (RuntimeError, StopIteration):
         pass
@@ -3319,7 +3319,7 @@ def _pl_put(url, text):
     if not text:
         return
     with _pl_lock:
-        if len(_pl_cache) > 60:
+        if len(_pl_cache) > 200:
             for k in list(_pl_cache)[:100]:
                 _pl_cache.pop(k, None)
         _pl_cache[url] = (time.time() + PL_TTL, text)
@@ -4948,8 +4948,8 @@ def _restore_from_db():
     print("[rt2] state restored from DB", flush=True)
 
 
-MEM_SOFT_MB = _env_int("MEM_SOFT_MB", 170)    # above this: drop caches + return memory to the OS
-MEM_HARD_MB = _env_int("MEM_HARD_MB", 210)    # above this: also drop the poster memory cache
+MEM_SOFT_MB = _env_int("MEM_SOFT_MB", 450)    # above this: drop caches + return memory to the OS
+MEM_HARD_MB = _env_int("MEM_HARD_MB", 600)    # above this: also drop the poster memory cache
 
 
 def _mem_watch():
@@ -5005,20 +5005,23 @@ def _startup():
 
 
 class _LimitedServer(ThreadingHTTPServer):
-    """At most MAX_CONN requests run at once (each one is a thread = RAM)."""
+    """Caps how many requests run at once - WITHOUT ever blocking the accept loop.
+    (The old version waited for a free slot inside serve_forever(): when ~48 long video/proxy
+    requests were open, the whole server stopped accepting -> Cloudflare 502.)
+    The wait now happens inside the request's own thread; if no slot frees up, a quick 503."""
     daemon_threads = True
-    request_queue_size = 128
-    _slots = threading.BoundedSemaphore(_env_int("MAX_CONN", 48))
-
-    def process_request(self, request, client_address):
-        self._slots.acquire()
-        try:
-            super().process_request(request, client_address)
-        except Exception:
-            self._slots.release()
-            raise
+    request_queue_size = 256
+    _slots = threading.BoundedSemaphore(_env_int("MAX_CONN", 160))
 
     def process_request_thread(self, request, client_address):
+        if not self._slots.acquire(timeout=8):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 2\r\n"
+                                b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+            except Exception:
+                pass
+            self.shutdown_request(request)
+            return
         try:
             super().process_request_thread(request, client_address)
         finally:
@@ -5027,7 +5030,7 @@ class _LimitedServer(ThreadingHTTPServer):
 
 def main():
     try:
-        threading.stack_size(512 * 1024)       # many request threads: small stacks
+        threading.stack_size(1024 * 1024)       # many request threads: small stacks
     except Exception:
         pass
     guard.start()                                                 # VIP keys + saved PROTECT mode (background)
