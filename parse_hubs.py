@@ -193,6 +193,9 @@ def main():
     for h in d["hub_pages"]:
         hubs[strong(h["url"])] = h
 
+    # never crawl WordPress comment-pagination copies of a page
+    hubs = {k: h for k, h in hubs.items()
+            if not re.search(r"comment-page|replytocom|\?", h["url"])}
     todo = [(key, h) for key, h in hubs.items() if key not in done]
     total_rows = 0
     t0 = time.time()

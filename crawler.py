@@ -34,7 +34,8 @@ STATE_JSON = ROOT / "crawl_state.json"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
-HOST = "www.rareanimes.com"
+HOST = "www.rareanimes.mov"
+HOSTS = {"www.rareanimes.mov", "rareanimes.mov", "www.rareanimes.com", "rareanimes.com"}
 STORE_HOST = "store.animetoonhindi.com"
 
 SKIP_SUBSTR = (
@@ -63,7 +64,10 @@ errors = []
 def strong(u):
     """dedup key: (netloc, unquoted lowercase path w/o trailing slash)."""
     p = urlparse(u.split("#")[0])
-    return (p.netloc, unquote(p.path).lower().rstrip("/"))
+    nl = p.netloc.lower()
+    if nl in HOSTS:
+        nl = HOST                      # .com / .mov / non-www = same site
+    return (nl, unquote(p.path).lower().rstrip("/"))
 
 
 def canon(u):
@@ -90,7 +94,7 @@ def is_download_link(url, label=""):
 
 def is_content(u):
     p = urlparse(u.split("#")[0])
-    if p.netloc != HOST:
+    if p.netloc not in HOSTS:
         return False
     q = p.path + (f"?{p.query}" if p.query else "")
     if any(k in q for k in SKIP_SUBSTR):

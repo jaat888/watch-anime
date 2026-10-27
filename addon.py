@@ -140,7 +140,36 @@ def _load_jsonl(path):
     return rows
 
 
-ROWS = _load_jsonl(os.path.join(BASE_DIR, "episodes_index.jsonl"))
+_JUNK_HUB_RE = re.compile(r"comment-page|replytocom|\?")
+
+
+def _canon_hub(u):
+    return re.sub(r"/comment-page-\d+/?$", "/", (u or "").split("#")[0].split("?")[0])
+
+
+def _clean_rows(rows):
+    """WordPress comment-pagination copies of a hub (/comment-page-N/,
+    ?replytocom=) carry the SAME episodes with freshly randomised zipper
+    tokens, so they never dedupe by link.  Drop those copies whenever the real
+    hub has rows; for a hub only ever seen through copies keep the first copy
+    (rewritten to the canonical URL)."""
+    clean_hubs = {_canon_hub(r.get("hub_url")) for r in rows
+                  if not _JUNK_HUB_RE.search(r.get("hub_url") or "")}
+    first, out = {}, []
+    for r in rows:
+        u = r.get("hub_url") or ""
+        if not _JUNK_HUB_RE.search(u):
+            out.append(r)
+            continue
+        c = _canon_hub(u)
+        if c in clean_hubs:
+            continue
+        if first.setdefault(c, u) == u:
+            r["hub_url"] = c
+            out.append(r)
+    return out
+
+ROWS = _clean_rows(_load_jsonl(os.path.join(BASE_DIR, "episodes_index.jsonl")))
 
 
 def _hub_key(r):
@@ -270,6 +299,8 @@ def _tmdb_boot():
 
 def _build_shows():
     for r in ROWS:
+        r["hub_url"] = re.sub(r"/comment-page-\d+/?$", "/",
+                              (r.get("hub_url") or "").split("#")[0].split("?")[0])
         show = r.get("show") or ""
         slug = _slug(show)
         rec = SHOWS.get(slug)
@@ -283,7 +314,10 @@ def _build_shows():
         except (TypeError, ValueError):
             continue
         lst = rec["eps"].setdefault((s, e), [])
-        if r not in lst:                 # rebuild-safe: no duplicate rows
+        # rebuild-safe + mirror-safe: the same link under another hub URL
+        # (WordPress comment-page / ?replytocom copies) is NOT a new row
+        if not any(o.get("lang") == r.get("lang") and o.get("mq") == r.get("mq")
+                   and o.get("sb") == r.get("sb") for o in lst):
             lst.append(r)
     for rec in SHOWS.values():
         # season-less hubs (Hagemaru, Luckyman, Monster Kid, AoT OAD ...) have
@@ -3946,7 +3980,7 @@ def _reload_catalog():
     """Re-read episodes_index.jsonl and merge new shows/episodes into the
     live SHOWS dict (no restart).  New shows get a poster in background."""
     global ROWS
-    ROWS = _load_jsonl(os.path.join(BASE_DIR, "episodes_index.jsonl"))
+    ROWS = _clean_rows(_load_jsonl(os.path.join(BASE_DIR, "episodes_index.jsonl")))
     with STORE_LOCK:
         _build_shows()
         missing = [r for r in SHOWS.values() if not r.get("poster")]
@@ -4014,7 +4048,7 @@ def _catalog_delta_apply():
         merged = keep + delta
     else:                                                       # new deploy: shipped data wins,
         merged = ROWS + [r for r in delta if _hub_key(r) not in BASE_HUBS]   # only add unknown hubs
-    ROWS = merged
+    ROWS = _clean_rows(merged)
     try:
         path = os.path.join(BASE_DIR, "episodes_index.jsonl")
         tmp = path + ".tmp"

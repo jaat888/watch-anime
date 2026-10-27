@@ -49,14 +49,30 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 
 def strong(u):
     p = urlparse(u.split("#")[0])
-    return unquote(p.path).lower().rstrip("/")
+    path = re.sub(r"/comment-page-\d+$", "", unquote(p.path).lower().rstrip("/"))
+    return path
 
 
 def is_real_hub(u):
     p = strong(u)
-    if "/category/" in p or "replytocom" in u or p.endswith("/feed") or "/feed/" in p:
+    if "?" in u or "comment-page" in u or "/category/" in p or "replytocom" in u or p.endswith("/feed") or "/feed/" in p:
         return False
-    return p.startswith("/hindi/")
+    segs = [x for x in p.split("/") if x]
+    if not segs or segs[0] in C.STATIC_SKIP:
+        return False
+    if segs[0] == "hindi":
+        return len(segs) > 1
+    # root-level / other-category hubs (/disney-xd/..., /hindi-dub/..., /<slug>/)
+    return True
+
+
+def _hub_links(text):
+    """every on-site content link (any category), not only /hindi/."""
+    out = set()
+    for m in re.findall(r'href="' + re.escape(SITE) + r'(/[^"#?]+?)/?"', text):
+        if is_real_hub(SITE + m):
+            out.add(m)
+    return out
 
 
 def collect_targets(feed_pages, full=False, max_pages=400):
@@ -84,7 +100,7 @@ def collect_targets(feed_pages, full=False, max_pages=400):
     for listing in ("/home/", f"/{_py}/{_pm:02d}/", time.strftime("/%Y/%m/")):
         try:
             r = _get(SITE + listing)
-            cand |= set(re.findall(r'href="' + SITE + r'(/hindi/[^"]+?)/?"', r.text))
+            cand |= _hub_links(r.text)
         except Exception as e:
             print(f"[index] listing {listing} failed: {e!r}", flush=True)
     if full:
@@ -97,7 +113,7 @@ def collect_targets(feed_pages, full=False, max_pages=400):
                 break
             if r.status_code == 404:
                 break
-            found = set(re.findall(r'href="' + SITE + r'(/hindi/[^"]+?)/?"', r.text))
+            found = _hub_links(r.text)
             found.discard("/hindi")
             if not found:
                 break
