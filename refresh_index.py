@@ -53,12 +53,20 @@ def strong(u):
     return path
 
 
+# site's own index / utility pages: they LIST shows, they are not shows
+_NOT_HUBS = {"all-anime-cartoon-movies-list", "all-anime-cartoon-series-list",
+             "hindi-cartoon-series", "hindi-me-toons", "cartoontechkidctk",
+             "desitvforum", "cookie-policy", "contact-us", "dmca", "disclaimer"}
+_LIST_PAGES = ("/all-anime-cartoon-series-list/", "/all-anime-cartoon-movies-list/",
+               "/hindi-cartoon-series/", "/hindi-me-toons/")
+
+
 def is_real_hub(u):
     p = strong(u)
-    if "?" in u or "comment-page" in u or "/category/" in p or "replytocom" in u or p.endswith("/feed") or "/feed/" in p:
+    if "?" in u or "comment-page" in u or "/page/" in p or "/category/" in p or "/tag/" in p or "replytocom" in u or p.endswith("/feed") or "/feed/" in p:
         return False
     segs = [x for x in p.split("/") if x]
-    if not segs or segs[0] in C.STATIC_SKIP:
+    if not segs or segs[0] in C.STATIC_SKIP or segs[0] in _NOT_HUBS:
         return False
     if segs[0] == "hindi":
         return len(segs) > 1
@@ -69,9 +77,48 @@ def is_real_hub(u):
 def _hub_links(text):
     """every on-site content link (any category), not only /hindi/."""
     out = set()
-    for m in re.findall(r'href="' + re.escape(SITE) + r'(/[^"#?]+?)/?"', text):
+    for m in re.findall(r'href=["\'](?:https?://(?:www\.)?rareanimes\.(?:mov|com))?(/[^"\'#?]+?)/?["\']', text):
         if is_real_hub(SITE + m):
             out.add(m)
+    return out
+
+
+_SITEMAPS = ("/sitemap_index.xml", "/wp-sitemap.xml", "/sitemap.xml",
+             "/post-sitemap.xml", "/page-sitemap.xml")
+_SAME_HOSTS = ("www.rareanimes.mov", "rareanimes.mov", "www.rareanimes.com", "rareanimes.com")
+
+
+def _sitemap_links(max_files=80):
+    """EVERY post url the site lists in its WordPress sitemap(s) - finds old
+    shows that live outside /hindi/ and never appeared in the feed/archive
+    walk.  Never raises; returns {"/path", ...}."""
+    out, seen, todo = set(), set(), [SITE + p for p in _SITEMAPS]
+    while todo and len(seen) < max_files:
+        u = todo.pop(0)
+        if u in seen:
+            continue
+        seen.add(u)
+        try:
+            r = _get(u)
+        except Exception as e:
+            print(f"[index] sitemap {u} failed: {e!r}", flush=True)
+            continue
+        if r.status_code != 200 or _cf(r):
+            continue
+        for loc in re.findall(r"<loc>\s*(.*?)\s*</loc>", r.text or "", re.S):
+            loc = loc.replace("&amp;", "&")
+            pu = urlparse(loc)
+            if pu.netloc and pu.netloc.lower() not in _SAME_HOSTS:
+                continue
+            if pu.path.lower().endswith(".xml"):
+                todo.append(SITE + pu.path + (f"?{pu.query}" if pu.query else ""))
+            else:
+                path = pu.path.rstrip("/")
+                if path and is_real_hub(SITE + path):
+                    out.add(path)
+        time.sleep(0.2)
+    print(f"[index] sitemap: {len(out)} candidate pages from {len(seen)} files",
+          flush=True)
     return out
 
 
@@ -119,6 +166,20 @@ def collect_targets(feed_pages, full=False, max_pages=400):
                 break
             cand |= found
             time.sleep(0.2)
+    if full:
+        for lp in _LIST_PAGES:
+            try:
+                r = _get(SITE + lp)
+                got = _hub_links(r.text) if r.status_code == 200 else set()
+                print(f"[index] list page {lp}: HTTP {r.status_code}, "
+                      f"{len(got)} show links", flush=True)
+                cand |= got
+            except Exception as e:
+                print(f"[index] list page {lp} failed: {e!r}", flush=True)
+        try:
+            cand |= _sitemap_links()
+        except Exception as e:
+            print(f"[index] sitemap walk failed: {e!r}", flush=True)
     cand = {SITE + c for c in cand}
     cand |= set(feed)
     return cand, feed
