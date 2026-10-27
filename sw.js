@@ -1,9 +1,10 @@
-/* mollad_jaat service worker: the Home page (and its show list) opens from the
-   device when the network is slow, but the NETWORK always wins when it answers
-   within a moment, so "latest episode" and the lists are never stale.
-   Nothing else is touched: video, HLS, /api/watch, accounts etc. go to the network. */
-const V = "mj-shell-v2";
-const WAIT = 2500;   // ms to wait for the network before showing the saved copy
+/* mollad_jaat service worker.
+   Only the app shell ("/") is handled: the NETWORK wins if it answers within a few
+   seconds, otherwise the saved copy opens instantly (e.g. while a free host is waking up).
+   Only a real copy of the app is ever saved - never a host wake-up/error page.
+   Video, HLS and every /api call go straight to the network (the page keeps its own list cache). */
+const V = "mj-shell-v3";
+const WAIT = 4000;   // ms to wait for the network before showing the saved copy
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", e => e.waitUntil((async () => {
@@ -12,24 +13,25 @@ self.addEventListener("activate", e => e.waitUntil((async () => {
 })()));
 
 self.addEventListener("fetch", e => {
-  const r = e.request;
-  if (r.method !== "GET") return;
-  const u = new URL(r.url);
-  if (u.origin !== location.origin) return;
-  const nav = r.mode === "navigate" && (u.pathname === "/" || u.pathname === "/index.html");
-  if (!nav && u.pathname !== "/api/shows") return;
-  e.respondWith(netFirst(e, nav ? "/" : "/api/shows", r));
+  const r = e.request, u = new URL(r.url);
+  if (r.method !== "GET" || u.origin !== location.origin) return;
+  if (r.mode === "navigate" && (u.pathname === "/" || u.pathname === "/index.html")) e.respondWith(shell(e, r));
 });
 
-async function netFirst(e, key, req) {
+async function isApp(res) {
+  if (!res || !res.ok || !(res.headers.get("content-type") || "").includes("text/html")) return false;
+  try { return (await res.clone().text()).includes('id="app"'); } catch (_) { return false; }
+}
+
+async function shell(e, req) {
   const c = await caches.open(V);
   const net = fetch(req).then(async res => {
-    if (res && res.ok) { try { await c.put(key, res.clone()); } catch (_) {} }
-    return res;
+    if (await isApp(res)) { try { await c.put("/", res.clone()); } catch (_) {} return res; }
+    return res && res.ok ? res : null;
   }).catch(() => null);
   e.waitUntil(net);
-  const hit = await c.match(key, { ignoreVary: true });
+  const hit = await c.match("/", { ignoreVary: true });
   if (!hit) return (await net) || new Response("Offline", { status: 503 });
   const res = await Promise.race([net, new Promise(r => setTimeout(() => r(null), WAIT))]);
-  return res && res.ok ? res : hit;            // fresh from the server, else the saved copy
+  return res && (await isApp(res)) ? res : hit;
 }

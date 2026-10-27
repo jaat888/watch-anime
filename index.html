@@ -664,7 +664,9 @@ let txT=0;function setTheme(t,anim){const r=document.documentElement;if(anim&&!L
 setTheme(store.get("theme")||"dark");
 
 addEventListener("beforeinstallprompt",e=>{e.preventDefault();installEvt=e;setTimeout(showInstall,4000)});
-if("serviceWorker"in navigator)navigator.serviceWorker.register("/sw.js").catch(()=>{});
+if("serviceWorker"in navigator){const had=!!navigator.serviceWorker.controller;let rl=0;
+  navigator.serviceWorker.addEventListener("controllerchange",()=>{if(had&&!rl&&!document.querySelector("video")?.currentTime){rl=1;location.reload()}});
+  navigator.serviceWorker.register("/sw.js").then(r=>{r.update().catch(()=>{});document.addEventListener("visibilitychange",()=>{if(!document.hidden)r.update().catch(()=>{})})}).catch(()=>{})}
 
 /* ---------- bottom navigation ---------- */
 const IC={home:'<path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/>',browse:'<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',list:'<path d="M12 21s-7-4.6-9.3-9.2C1.2 8.6 3 5 6.4 5c2 0 3.6 1.2 5.6 3.4C14 6.2 15.6 5 17.6 5 21 5 22.8 8.6 21.3 11.8 19 16.4 12 21 12 21z"/>',acct:'<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4.5 4-6 8-6s7 1.5 8 6"/>'};
@@ -711,10 +713,12 @@ async function loadShows(){if(SHOWS)return;
   if(c&&c.shows&&c.shows.length){SHOWS=c.shows;NOW=Date.now()/1e3;POP=c.popular||[];TREND=c.trending||POP;TRENDD=c.trending_day||[];setLists(c);sig=mkSig(c);setTimeout(refreshShows,300);return}
   $app.replaceChildren(...skHome());const j=await api("/api/shows");SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);sig=mkSig(j);saveShows(j)}
 let lastSync=Date.now();
-async function refreshShows(){if(!SHOWS)return;try{const j=await api("/api/shows");SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);SMAP=null;lastSync=Date.now();saveShows(j);const s2=mkSig(j),changed=s2!==sig;sig=s2;
-  const onHome=!location.hash.replace(/^#\/?/,"");if(changed&&onHome&&!document.querySelector(".modal")&&!document.activeElement?.matches?.("input,textarea")){const y=scrollY;home();scrollTo(0,y)}}catch(e){}}
+let rsFail=0;
+async function refreshShows(){if(!SHOWS)return;try{const j=await api("/api/shows");rsFail=0;SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);SMAP=null;lastSync=Date.now();saveShows(j);const s2=mkSig(j),changed=s2!==sig;sig=s2;
+  const onHome=!location.hash.replace(/^#\/?/,"");if(changed&&onHome&&!document.querySelector(".modal")&&!document.activeElement?.matches?.("input,textarea")){const y=scrollY;home();scrollTo(0,y)}}catch(e){if(++rsFail<=8)setTimeout(refreshShows,Math.min(60000,2500*2**rsFail))}}
 setInterval(()=>{if(!document.hidden)refreshShows()},3600000);
-document.addEventListener("visibilitychange",()=>{if(!document.hidden&&Date.now()-lastSync>3600000)refreshShows()});
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&Date.now()-lastSync>300000)refreshShows()});
+addEventListener("online",()=>{rsFail=0;refreshShows()});
 let SMAP=null;const bySlug=s=>{if(!SHOWS)return undefined;if(!SMAP||SMAP.size!==SHOWS.length)SMAP=new Map(SHOWS.map(x=>[x.slug,x]));return SMAP.get(s)};
 const isNew=s=>s.upd&&NOW-s.upd<7*86400;
 /* title shown to the user: AniList English title when the site name is romaji */
@@ -972,6 +976,12 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
     const bar=h("div",{class:"countdown"},label,h("div",{},h("button",{class:"go",onclick:()=>{clearInterval(nextTimer);go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1])}},"Play now"),h("button",{onclick:()=>{clearInterval(nextTimer);bar.remove()}},"Cancel")));
     box.append(bar);nextTimer=setInterval(()=>{n--;label.textContent="Next episode in "+n+"s";if(n<=0){clearInterval(nextTimer);go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1])}},1000)};
   const speed=h("select",{title:"Playback speed","aria-label":"Playback speed",onchange:e=>{video.playbackRate=+e.target.value}},[0.75,1,1.25,1.5,2].map(v=>h("option",{value:v,selected:v===1},v+"×")));
+  /* TV-style picture modes (CSS filters on the video, remembered per device) */
+  const PICS={standard:["Standard",""],vivid:["Vivid","saturate(1.4) contrast(1.06)"],dynamic:["Dynamic","saturate(1.25) contrast(1.15) brightness(1.06)"],cinema:["Cinema","contrast(1.12) saturate(.92) brightness(.94)"],warm:["Warm / night","sepia(.22) saturate(1.1) brightness(.92)"]};
+  let picNow=PICS[store.get("pic")]?store.get("pic"):"standard";
+  const setPic=k=>{picNow=k;video.style.filter=PICS[k][1];store.set("pic",k)};
+  const pic=h("select",{title:"Picture mode","aria-label":"Picture mode",onchange:e=>setPic(e.target.value)},Object.keys(PICS).map(k=>h("option",{value:k,selected:k===picNow},"Picture: "+PICS[k][0])));
+  video.style.filter=PICS[picNow][1];
   dlBtn.onclick=async()=>{const x=src[cur];
     if(x.kind!=="mq"){const a=h("a",{href:x.url,download:title});document.body.append(a);a.click();a.remove();dlLabel.textContent="Download started in your browser.";return}
     if(!hls||!hls.levels.length){dlLabel.textContent="Wait for the video to load first.";return}
@@ -980,7 +990,7 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
     try{await downloadLevel(uri,(title+" "+(L.height||"")+"p").replace(/[^\w\- ]+/g,"").trim().replace(/ +/g,"_"),dlBar,dlLabel);dlLabel.textContent="Download started. Check your browser\u2019s downloads. The file plays in VLC or MX Player."}
     catch(e){dlLabel.textContent=e.message;dlBar.style.width="0"}dlBtn.disabled=false};
   const tried=new Set();
-  function play(i){cur=i;tried.add(i);clearInterval(saveTimer);clearInterval(wdT);clearInterval(markT);markT=setInterval(()=>{if(!alive()){clearInterval(markT);return}if(!video.paused)mark()},2000);if(hls){hls.destroy();hls=null}qSel=-1;msg.style.display="flex";msg.textContent="Loading…";sels.replaceChildren(speed);
+  function play(i){cur=i;tried.add(i);clearInterval(saveTimer);clearInterval(wdT);clearInterval(markT);markT=setInterval(()=>{if(!alive()){clearInterval(markT);return}if(!video.paused)mark()},2000);if(hls){hls.destroy();hls=null}qSel=-1;msg.style.display="flex";msg.textContent="Loading…";sels.replaceChildren(speed,pic);
     const x=src[i];store.set("lang",x.lang);
     langBox.replaceChildren(...src.map((y,j)=>h("button",{class:"chip","aria-pressed":String(j===i),onclick:()=>play(j)},y.lang+(y.quality?" "+y.quality:""))));
     const bad=t=>{msg.style.display="flex";msg.replaceChildren(h("div",{},t||"This stream failed to load.",h("div",{style:"margin-top:12px"},h("button",{class:"chip",onclick:()=>{tried.clear();play(cur)}},"↻ Retry"))))};
