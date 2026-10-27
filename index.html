@@ -762,7 +762,7 @@ let CAPT="",CAPX=0,CAPP=null;
 try{const c=JSON.parse(store.get("cap")||"null");if(c&&c.t&&c.x>Date.now()){CAPT=c.t;CAPX=c.x}}catch(e){}
 function capToken(){if(CAPT&&CAPX>Date.now())return CAPT;CAPT="";return ""}
 function capForget(){CAPT="";CAPX=0;store.del("cap")}
-function loadCap(){return new Promise((ok,no)=>{if(window.CapGame)return ok();const sc=document.createElement("script");sc.src="/captcha.js?v=9";sc.onload=ok;sc.onerror=()=>{sc.remove();no(new Error("captcha script"))};document.head.append(sc)})}
+function loadCap(){return new Promise((ok,no)=>{if(window.CapGame)return ok();const sc=document.createElement("script");sc.src="/captcha.js?v=10";sc.onload=ok;sc.onerror=()=>{sc.remove();no(new Error("captcha script"))};document.head.append(sc)})}
 function solveCaptcha(){   /* -> Promise<true when passed>. One game at a time: everyone who asks waits for the same one. */
   if(CAPP)return CAPP;
   const p=(async()=>{try{let r;if(onTV())r=await tvPair();else{await loadCap();r=await CapGame.modal({headers:{"X-Device":DID}})}

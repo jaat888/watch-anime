@@ -57,12 +57,15 @@ def _num(key, default, lo, hi, cast=float):
         return default
 
 
-TTL = _num("CAPTCHA_TTL", 60, 10, 600, int)               # a captcha lives this long (seconds), one use
+TTL = _num("CAPTCHA_TTL", 120, 10, 600, int)               # a captcha lives this long (seconds), one use
 PASS_TTL = _num("CAPTCHA_PASS_MIN", 30, 1, 1440, int) * 60  # pass token life (phone / web)
 POW_BITS = _num("CAPTCHA_POW_BITS", 14, 0, 24, int)       # hidden puzzle: leading zero bits (14 = ~16k hashes)
 BURST_MAX = _num("CAPTCHA_BURST", 5, 2, 50, int)          # this many DIFFERENT videos in BURST_WIN s = rate limit seen
 BURST_WIN = 60
 HUMAN_FAIL = 60                     # human score (0-100) from which the shots are called a bot's
+MODE = os.environ.get("CAPTCHA_MODE", "tap").strip().lower()   # "tap" = tap the ball of the asked colour (easy) | "shoot" = old cannon game
+if MODE not in ("tap", "shoot"):
+    MODE = "tap"
 ROTATE_DAYS = _num("CAPTCHA_ROTATE_DAYS", 14, 1, 365, int)
 CONC_HARD = _num("CAPTCHA_CONC_HARD", 4, 2, 50, int)      # even a proven human may not run more live streams than this
 TV_HOURS = _num("CAPTCHA_TV_HOURS", 8, 1, 48, int)         # Step 9: TV pass lives this long (plan: 6-12 hours)
@@ -71,16 +74,16 @@ TV_PAIR_TTL = 120                                          # a QR / code works f
 TV_PAIR_OPEN = 6                                           # open QR codes per TV IP at a time (a hostel has many TVs)
 
 _DEFAULT = {
-    "speed": 1.0,        # how fast the balls move (x)
-    "size": 16.0,        # ball radius (px)
-    "balls": 4,          # how many balls (2-4; 4 keeps every colour on screen)
+    "speed": 0.35,       # how fast the balls move (x)  [SLOW: was 1.0]
+    "size": 26.0,        # ball radius (px)  [EASY: was 16]
+    "balls": 3,          # how many balls (2-4)  [EASY: was 4]
     "color_ms": 2200,    # a ball changes its colour every this many ms
-    "skew": 0.10,        # the shot goes this far crooked (radians, +-)
-    "bullet": 520.0,     # bullet speed (px/s)
-    "hits": 2,           # correct hits needed
-    "max_shots": 6,      # shots allowed
+    "skew": 0.0,         # the shot goes this far crooked (radians, +-)  [EASY: was 0.10]
+    "bullet": 800.0,     # bullet speed (px/s)  [EASY: was 520]
+    "hits": 3,           # correct hits needed
+    "max_shots": 5,      # taps allowed (5 tries, 3 right = pass)
     "min_shot_ms": 400,  # no shot sooner than this after the start / the previous shot
-    "slack": 3.0,        # extra hit distance (px), so a pixel-close shot is not lost to rounding
+    "slack": 10.0,       # extra hit distance (px)  [EASY: was 3]
 }
 _LIMITS = {"speed": (0.3, 3.0), "size": (8.0, 30.0), "balls": (2, 4), "color_ms": (600, 8000), "skew": (0.0, 0.3),
            "bullet": (250.0, 1200.0), "hits": (1, 4), "max_shots": (1, 10), "min_shot_ms": (100, 1500), "slack": (0.0, 10.0)}
@@ -197,16 +200,19 @@ def layout(seed, typ, c):
         rows[i], rows[j] = rows[j], rows[i]
     for i in range(n):
         d = 1 if r.below(2) else -1                       # every ball picks its own direction
-        b = {"c": perm[i], "ph": round(r.between(0, TAU), 4), "ph2": round(r.between(0, TAU), 4), "dir": d}
-        if typ == 0:                                      # zigzag: sideways triangle wave, bobbing rows
+        ty = r.below(4)                                   # ... and its OWN kind of path (all 4 kinds mixed in one game)
+        b = {"c": perm[i], "ty": ty, "ph": round(r.between(0, TAU), 4), "ph2": round(r.between(0, TAU), 4), "dir": d}
+        if ty == 0:                                       # zigzag: sideways triangle wave, bobbing rows
             b.update(f=round(r.between(0.18, 0.48), 4), g=round(r.between(1.0, 2.6), 4), y=50 + 36 * rows[i])
-        elif typ == 1:                                    # orbit: ellipses of different size, both directions
+        elif ty == 1:                                     # orbit: ellipses of different size, both directions
             b.update(f=round(r.between(0.7, 1.7), 4),
                      rx=round(52 + 24 * rows[i] + r.between(-8, 8), 3), ry=round(26 + 13 * rows[i] + r.between(-6, 6), 3))
-        elif typ == 2:                                    # lissajous: wide wandering curves
+        elif ty == 2:                                     # lissajous: wide wandering curves
             b.update(f=round(r.between(0.6, 1.5), 4), g=round(r.between(0.9, 2.2), 4))
         else:                                             # figure eight
             b.update(f=round(r.between(0.6, 1.4), 4), ry=round(r.between(30, 56), 3))
+        b.update(wa=round(r.between(6, 16), 3), wb=round(r.between(5, 12), 3), wf=round(r.between(0.5, 1.5), 4),   # random wobble on top,
+                 wg=round(r.between(0.6, 1.7), 4), wp=round(r.between(0, TAU), 4), wq=round(r.between(0, TAU), 4))  # so no path repeats
         balls.append(b)
     ms = int(c["max_shots"])
     return {
@@ -223,18 +229,24 @@ def _tri(x):                                              # triangle wave, perio
 
 def ball_pos(L, i, t_ms, c):
     """Where ball i is at time t_ms.  The page uses the same formulas to draw it."""
-    p, u, typ = L["balls"][i], t_ms / 1000.0 * float(c["speed"]), L["type"]
-    if typ != 1:
+    p, u = L["balls"][i], t_ms / 1000.0 * float(c["speed"])
+    ty = p.get("ty", L["type"])
+    if ty != 1:
         u *= p.get("dir", 1)
-    if typ == 0:
-        return 180.0 + 118.0 * _tri(u * p["f"] + p["ph"] / TAU), p["y"] + 20.0 * math.sin(u * p["g"] + p["ph2"])
-    if typ == 1:
+    if ty == 0:
+        x, y = 180.0 + 118.0 * _tri(u * p["f"] + p["ph"] / TAU), p["y"] + 20.0 * math.sin(u * p["g"] + p["ph2"])
+    elif ty == 1:
         a = u * p["f"] * p["dir"] + p["ph"]
-        return 180.0 + p["rx"] * math.cos(a), 110.0 + p["ry"] * math.sin(a)
-    if typ == 2:
-        return 180.0 + 125.0 * math.sin(u * p["f"] + p["ph"]), 105.0 + 55.0 * math.sin(u * p["g"] + p["ph2"])
-    a = u * p["f"] + p["ph"]
-    return 180.0 + 122.0 * math.sin(a), 105.0 + p["ry"] * math.sin(2.0 * a + p["ph2"])
+        x, y = 180.0 + p["rx"] * math.cos(a), 110.0 + p["ry"] * math.sin(a)
+    elif ty == 2:
+        x, y = 180.0 + 125.0 * math.sin(u * p["f"] + p["ph"]), 105.0 + 55.0 * math.sin(u * p["g"] + p["ph2"])
+    else:
+        a = u * p["f"] + p["ph"]
+        x, y = 180.0 + 122.0 * math.sin(a), 105.0 + p["ry"] * math.sin(2.0 * a + p["ph2"])
+    if "wa" in p:
+        x += p["wa"] * math.sin(u * p["wf"] + p["wp"])
+        y += p["wb"] * math.sin(u * p["wg"] + p["wq"])
+    return x, max(y, 32.0)
 
 
 def ball_color(L, i, t_ms, c):
@@ -338,7 +350,7 @@ def new(ip, dev="", typ=None, over=None, now=None):
         cid = secrets.token_urlsafe(12)
         salt = secrets.token_hex(8)
         rec = {"id": cid, "ipk": ipk, "dev": dev or "", "t0": now, "exp": now + TTL, "seed": seed, "L": L, "c": c,
-               "salt": salt, "bits": bits}
+               "salt": salt, "bits": bits, "mode": MODE}
         with _lock:
             _prune(now)
             _open[cid] = rec
@@ -346,7 +358,7 @@ def new(ip, dev="", typ=None, over=None, now=None):
             _stat["new"] += 1
         return {"id": cid, "ttl": TTL, "w": W, "h": H, "cannon": list(CANNON), "bullet_r": BULLET_R,
                 "cfg": {k: c[k] for k in ("speed", "size", "balls", "color_ms", "bullet", "hits", "max_shots", "min_shot_ms", "slack")},
-                "game": {"type": typ, "name": TYPES[typ], "balls": L["balls"], "targets": L["targets"][: int(c["max_shots"])],
+                "game": {"mode": MODE, "type": typ, "name": TYPES[typ], "balls": L["balls"], "targets": L["targets"][: int(c["max_shots"])],
                          "skews": L["skews"][: int(c["max_shots"])]},
                 "pow": {"salt": salt, "bits": bits, "how": "sha256(id:salt:nonce) with `bits` leading zero bits"}}
     except Exception as e:
@@ -455,6 +467,58 @@ def _read_shots(body, c):
         return None
 
 
+# ------------------------------------------------------------- tap mode ----
+def _read_taps(body, c):
+    """Clean the taps the browser sent: [{t, x, y}].  -> list or None (garbage)."""
+    try:
+        raw = body.get("shots")
+        if not isinstance(raw, list) or not 1 <= len(raw) <= int(c["max_shots"]):
+            return None
+        out = []
+        for s in raw:
+            t, x, y = float(s["t"]), float(s["x"]), float(s["y"])
+            if not all(math.isfinite(v) for v in (t, x, y)) or t < 0 or t > 120000 or not (-60 <= x <= W + 60) or not (-60 <= y <= H + 60):
+                return None
+            out.append({"t": int(round(t)), "x": x, "y": y})
+        return out
+    except Exception:
+        return None
+
+
+def replay_tap(L, c, taps):
+    """The server decides itself: at the tap time, is the tap on a ball of the asked colour?  -> (hits, [per tap])"""
+    need, hits, out = int(c["hits"]), 0, []
+    reach = float(c["size"]) + float(c["slack"])
+    for s in taps:
+        if hits >= need:
+            break
+        want = L["targets"][hits]
+        best, bd = -1, 1e18
+        for i in range(L["n"]):
+            x, y = ball_pos(L, i, s["t"], c)
+            dd = (x - s["x"]) ** 2 + (y - s["y"]) ** 2
+            if dd <= reach * reach and dd < bd:
+                best, bd = i, dd
+        col = ball_color(L, best, s["t"], c) if best >= 0 else None
+        ok = bool(best >= 0 and col == want)
+        hits += ok
+        out.append({"hit": best, "t": s["t"], "color": col, "want": want, "ok": ok, "dist": round(math.sqrt(bd), 2) if best >= 0 else None})
+    return hits, out
+
+
+def tap_score(taps, res):
+    """0-100: how machine-like are the taps?  (dead-centre every time / evenly timed)"""
+    score, why = 0, []
+    hit_d = [r["dist"] for r in res if r["dist"] is not None]
+    if len(hit_d) >= 2 and max(hit_d) < 0.6:
+        score += 70; why.append("har tap gend ke bilkul beech me")
+    if len(taps) >= 3:
+        d = [b["t"] - a["t"] for a, b in zip(taps, taps[1:])]
+        if _std(d) < 0.5:
+            score += 30; why.append("taps ek dum barabar gap pe")
+    return score, why
+
+
 # ----------------------------------------------------------------- verify ----
 def _record(ip, ok, why, score=0, ms=0):
     now = time.time()
@@ -491,7 +555,8 @@ def verify(cid, ip, body, now=None, lab=False):
                 out.update(real_why=w, **detail)
             return out
 
-        shots = _read_shots(body, c)
+        tap = rec.get("mode") == "tap"
+        shots = (_read_taps if tap else _read_shots)(body, c)
         if shots is None:
             return fail("shots")
 
@@ -506,13 +571,17 @@ def verify(cid, ip, body, now=None, lab=False):
             prev = s["t"]
         if shots[-1]["t"] > (now - rec["t0"]) * 1000 + 1500:
             return fail("clock")
-        # 3. does the aim look like a hand?
-        score, hw = human_score(shots)
+        # 3. does the aim look like a hand?  4. play the game again on the server
+        if tap:
+            hits, res = replay_tap(L, c, shots)
+            score, hw = tap_score(shots, res)
+        else:
+            score, hw = human_score(shots)
         detail.update(human=score, human_why=hw)
         if score >= HUMAN_FAIL:
             return fail("human", score)
-        # 4. play the game again on the server
-        hits, res = replay(L, c, shots)
+        if not tap:
+            hits, res = replay(L, c, shots)
         detail.update(hits=hits, shots=res, need=int(c["hits"]))
         if hits < int(c["hits"]):
             return fail("miss", score)

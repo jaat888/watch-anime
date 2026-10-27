@@ -14,11 +14,14 @@ const CAP = { W: 360, H: 300, CX: 180, CY: 284, BR: 5, STEP: 8, NCOL: 4 };
 /* ------------------------------------------------------------ part 1: maths (= captcha.py) */
 function capTri(x) { const f = x - Math.floor(x); return 4 * Math.abs(f - 0.5) - 1; }
 function capBallPos(game, i, tMs, cfg) {
-  const p = game.balls[i], T = 2 * Math.PI; let u = tMs / 1000 * cfg.speed; if (game.type !== 1) u *= (p.dir || 1);
-  if (game.type === 0) return [180 + 118 * capTri(u * p.f + p.ph / T), p.y + 20 * Math.sin(u * p.g + p.ph2)];
-  if (game.type === 1) { const a = u * p.f * p.dir + p.ph; return [180 + p.rx * Math.cos(a), 110 + p.ry * Math.sin(a)]; }
-  if (game.type === 2) return [180 + 125 * Math.sin(u * p.f + p.ph), 105 + 55 * Math.sin(u * p.g + p.ph2)];
-  const a = u * p.f + p.ph; return [180 + 122 * Math.sin(a), 105 + p.ry * Math.sin(2 * a + p.ph2)];
+  const p = game.balls[i], T = 2 * Math.PI, ty = p.ty === undefined ? game.type : p.ty; let u = tMs / 1000 * cfg.speed; if (ty !== 1) u *= (p.dir || 1);
+  let x, y;
+  if (ty === 0) { x = 180 + 118 * capTri(u * p.f + p.ph / T); y = p.y + 20 * Math.sin(u * p.g + p.ph2); }
+  else if (ty === 1) { const a = u * p.f * p.dir + p.ph; x = 180 + p.rx * Math.cos(a); y = 110 + p.ry * Math.sin(a); }
+  else if (ty === 2) { x = 180 + 125 * Math.sin(u * p.f + p.ph); y = 105 + 55 * Math.sin(u * p.g + p.ph2); }
+  else { const a = u * p.f + p.ph; x = 180 + 122 * Math.sin(a); y = 105 + p.ry * Math.sin(2 * a + p.ph2); }
+  if (p.wa !== undefined) { x += p.wa * Math.sin(u * p.wf + p.wp); y += p.wb * Math.sin(u * p.wg + p.wq); }
+  return [x, Math.max(y, 32)];
 }
 function capBallColor(game, i, tMs, cfg) { return game.balls[i].c % CAP.NCOL; }
 /* shot k fired at tMs with finger angle a; the bullet really flies along a + skews[k] */
@@ -62,6 +65,24 @@ class CapShooter {
     const ok = res.hit >= 0 && res.color === want;
     this.shots.push(shot); this.prevT = tt; this.k++; this.hits += ok ? 1 : 0;
     return { shot, res, ok, want, k };
+  }
+  body(id, pow, lab) { const b = { id: id, pow: pow, shots: this.shots }; if (lab) b.lab = true; return b; }
+}
+
+/* tap mode: tap the ball that has the asked colour (same maths as captcha.py replay_tap) */
+class CapTapper {
+  constructor(game, cfg) { this.g = game; this.c = cfg; this.hits = 0; this.k = 0; this.shots = []; this.prevT = 0; this.drag = false; }
+  target() { return this.g.targets[Math.min(this.hits, this.g.targets.length - 1)]; }
+  done() { return this.hits >= this.c.hits; }
+  exhausted() { return !this.done() && this.k >= this.c.max_shots; }
+  tap(px, py, t) {
+    if (this.done() || this.exhausted()) return null;
+    const tt = Math.round(t); if (tt - this.prevT < this.c.min_shot_ms) return { early: true };
+    const want = this.target(), reach = this.c.size + (this.c.slack === undefined ? 3 : this.c.slack); let best = -1, bd = 1e18;
+    for (let i = 0; i < this.g.balls.length; i++) { const q = capBallPos(this.g, i, tt, this.c), dd = (q[0] - px) * (q[0] - px) + (q[1] - py) * (q[1] - py); if (dd <= reach * reach && dd < bd) { best = i; bd = dd; } }
+    const color = best >= 0 ? capBallColor(this.g, best, tt, this.c) : null, ok = best >= 0 && color === want, k = this.k;
+    this.shots.push({ t: tt, x: Math.round(px * 100) / 100, y: Math.round(py * 100) / 100 }); this.prevT = tt; this.k++; this.hits += ok ? 1 : 0;
+    return { shot: this.shots[k], res: { hit: best, t: tt, color: color }, ok, want, k };
   }
   body(id, pow, lab) { const b = { id: id, pow: pow, shots: this.shots }; if (lab) b.lab = true; return b; }
 }
@@ -161,11 +182,12 @@ function run(host, o) {
     let g; try { g = await post("/api/captcha/new", body); } catch (e) { g = {}; }
     if (st.dead) return;
     if (!g.id) { st.phase = "err"; ttl.textContent = "Couldn't load"; say(g._status === 429 ? "Too many tries - wait a minute, then tap here." : "Network problem - tap here to retry."); msg.style.cursor = "pointer"; msg.onclick = () => { msg.onclick = null; msg.style.cursor = ""; start(); }; return; }
-    st.id = g.id; st.game = g.game; st.cfg = g.cfg; st.sh = new CapShooter(g.game, g.cfg); st.pow = capSolvePow(g.id, g.pow.salt, g.pow.bits);
-    st.t0 = performance.now(); st.phase = "play"; if (o.onStart) o.onStart(g); head(); say("Thumb in the lower half: slide, then let go.");
+    st.id = g.id; st.game = g.game; st.cfg = g.cfg; st.tap = g.game.mode === "tap"; st.sh = st.tap ? new CapTapper(g.game, g.cfg) : new CapShooter(g.game, g.cfg); st.pow = capSolvePow(g.id, g.pow.salt, g.pow.bits);
+    st.t0 = performance.now(); st.phase = "play"; if (o.onStart) o.onStart(g); head(); say(st.tap ? "Read the question below, then tap the right ball." : "Thumb in the lower half: slide, then let go.");
   }
   function head() {
-    const w = st.sh.target(); chip.style.background = COLS[w].c; ttl.textContent = "Shoot the " + COLS[w].n + " ball";
+    if (st.tap) { chip.style.display = "none"; ttl.textContent = "Quick check"; dots.textContent = ""; return; }   /* tap mode: the real question is drawn on the canvas only, not in the page text */
+    const w = st.sh.target(); chip.style.background = COLS[w].c; ttl.textContent = (st.tap ? "Tap the " : "Shoot the ") + COLS[w].n + " ball";
     dots.textContent = Array.from({ length: st.cfg.hits }, (_, i) => i < st.sh.hits ? "●" : "○").join("");
   }
   async function submit() {
@@ -187,12 +209,22 @@ function run(host, o) {
   cv.addEventListener("pointerdown", e => {
     if (st.phase !== "play") return; e.preventDefault();
     const p = gxy(e);
+    if (st.tap) {
+      const r = st.sh.tap(p[0], p[1], now(e)); if (!r) return;
+      if (r.early) { say("Wait a moment between taps."); return; }
+      st.fx.push({ t: performance.now() - st.t0, ok: r.ok, p: [p[0], p[1]] }); head();
+      say(r.res.hit < 0 ? "Missed - tap right on a ball." : r.ok ? "Hit!" : "Wrong ball - read the question again.");
+      if (o.onShot) o.onShot({ k: r.k, t: r.shot.t, a: 0, hit: r.res.hit, color: r.res.color, want: r.want, ok: r.ok, hits: st.sh.hits, skew: 0 });
+      if (st.sh.done()) setTimeout(submit, 450);
+      else if (st.sh.exhausted()) { if (o.lab) setTimeout(submit, 450); else { st.phase = "wait"; say("Out of taps - fresh game…"); st.autoT = setTimeout(() => start(), 1100); } }
+      return;
+    }
     if (st.sh.down(p[0], p[1], now(e))) { try { cv.setPointerCapture(e.pointerId); } catch (_) {} st.thumb = p; st.aim = capAim(p[0], p[1]); st.hint = 0; }
     else { st.flash = performance.now(); say("Put your thumb in the lower half."); }
   });
   cv.addEventListener("pointermove", e => { if (st.phase !== "play" || !st.sh.drag) return; e.preventDefault(); const p = gxy(e); st.sh.move(p[0], p[1], now(e)); st.thumb = p; st.aim = capAim(p[0], p[1]); });
   const up = e => {
-    if (st.phase !== "play") return; const p = gxy(e), r = st.sh.up(p[0], p[1], now(e)); st.thumb = null; if (!r) return;
+    if (st.tap || st.phase !== "play") return; const p = gxy(e), r = st.sh.up(p[0], p[1], now(e)); st.thumb = null; if (!r) return;
     if (r.early) { say("Wait a moment between shots."); return; }
     st.bul.push({ k: r.k, t: r.shot.t, ang: r.shot.a + st.game.skews[r.k], res: r.res, ok: r.ok });
     head(); say(r.res.hit < 0 ? "Missed - no ball there." : r.ok ? "Hit!" : "Wrong colour.");
@@ -214,7 +246,7 @@ function run(host, o) {
     if (st.dead) return; st.raf = requestAnimationFrame(frame);
     const c = ctx; c.setTransform(sc, 0, 0, sc, 0, 0); c.clearRect(0, 0, CAP.W, CAP.H);
     const bg = c.createLinearGradient(0, 0, 0, CAP.H); bg.addColorStop(0, "#1a1622"); bg.addColorStop(1, "#2a2133"); c.fillStyle = bg; c.fillRect(0, 0, CAP.W, CAP.H);
-    c.fillStyle = "rgba(255,255,255,.045)"; c.fillRect(0, CAP.H / 2, CAP.W, CAP.H / 2);          /* thumb zone */
+    if (!st.tap) { c.fillStyle = "rgba(255,255,255,.045)"; c.fillRect(0, CAP.H / 2, CAP.W, CAP.H / 2); }          /* thumb zone */
     if (st.phase === "load" || st.phase === "err") return;
     const t = performance.now() - st.t0, g = st.game, cf = st.cfg, k = st.sh.k;
     for (let i = 0; i < g.balls.length; i++) { const p = capBallPos(g, i, t, cf); ball(p[0], p[1], cf.size, capBallColor(g, i, t, cf)); }
@@ -224,6 +256,13 @@ function run(host, o) {
       const d = cf.bullet * el / 1000; c.beginPath(); c.arc(CAP.CX + Math.sin(b.ang) * d, CAP.CY - Math.cos(b.ang) * d, CAP.BR + 1, 0, 6.2832); c.fillStyle = "#fff"; c.fill(); return true; });
     st.fx = st.fx.filter(f => { const el = t - f.t; if (el > 500) return false; c.globalAlpha = 1 - el / 500; c.lineWidth = 3; c.strokeStyle = f.ok ? "#4ade80" : "#9ca3af";
       c.beginPath(); c.arc(f.p[0], f.p[1], cf.size + el / 12, 0, 6.2832); c.stroke(); c.fillStyle = c.strokeStyle; c.font = "bold 22px system-ui"; c.textAlign = "center"; c.fillText(f.ok ? "✓" : "✗", f.p[0], f.p[1] - cf.size - 8 - el / 25); c.globalAlpha = 1; return true; });
+    if (st.tap) {      /* the question lives on the canvas only: a picture, not page text */
+      const w = st.sh.target(), left = cf.max_shots - k;
+      c.beginPath(); c.arc(34, 252, 17, 0, 6.2832); c.fillStyle = COLS[w].c; c.fill(); c.lineWidth = 3; c.strokeStyle = "#fff"; c.stroke(); glyph(c, w, 34, 252, 7, "#fff");
+      c.textAlign = "left"; c.fillStyle = "#fff"; c.font = "700 19px system-ui"; c.fillText("Tap the " + COLS[w].n + " ball", 60, 259);
+      c.textAlign = "center"; c.font = "600 14px system-ui"; c.fillStyle = "rgba(255,255,255,.75)";
+      c.fillText(Array.from({ length: cf.hits }, (_, i) => i < st.sh.hits ? "●" : "○").join(" ") + "      tries left: " + left, CAP.CX, 284); return;
+    }
     /* aim line: starts above the cannon and stays clear of the thumb (which is lower) */
     const want = st.sh.target(), aim = st.aim + (g.skews[Math.min(k, g.skews.length - 1)] || 0);
     if (st.sh.drag) { c.save(); c.setLineDash([6, 7]); c.lineWidth = 2.5; c.strokeStyle = "rgba(255,255,255,.75)"; c.beginPath();
@@ -254,7 +293,7 @@ function modal(o) {
 }
 const api = { modal, run, COLS, closeAll() { if (openModal) openModal(null); } };
 root.CapGame = api;
-const math = { CAP, capBallPos, capBallColor, capSimShot, capAim, CapShooter, capSha256, capPowOk, capSolvePow, capZeroBits };
+const math = { CapTapper, CAP, capBallPos, capBallColor, capSimShot, capAim, CapShooter, capSha256, capPowOk, capSolvePow, capZeroBits };
 root.CapMath = math;
 if (typeof module !== "undefined") module.exports = math;
 })(typeof window !== "undefined" ? window : globalThis);
