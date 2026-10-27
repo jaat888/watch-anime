@@ -174,7 +174,12 @@ def _load_jsonl(path):
             for line in fh:
                 line = line.strip()
                 if line:
-                    rows.append(json.loads(line))
+                    r = json.loads(line)
+                    for k in ("show", "hub_url", "lang"):
+                        v = r.get(k)
+                        if isinstance(v, str):
+                            r[k] = sys.intern(v)
+                    rows.append(r)
     except FileNotFoundError:
         pass
     return rows
@@ -445,9 +450,9 @@ _MASTER_RE = re.compile(r'"file":"(https:[^"]+\.m3u8)"')
 _WALL_RE   = re.compile(r'data-href="([^"]+)"')
 
 _WALK_SEM   = threading.Semaphore(3)   # codedew rate-limits parallel walks
-_hls_cache  = _LRU(3000)                       # zipper -> (expires, master, embed)
+_hls_cache  = _LRU(800)                       # zipper -> (expires, master, embed)
 _hls_lock   = threading.Lock()
-_mqres_cache = _LRU(3000)                      # master URL -> (expires, "1080p")
+_mqres_cache = _LRU(800)                      # master URL -> (expires, "1080p")
 _RES_RE = re.compile(r"(?i)(?<![0-9x])(2160|1080|720|480|360)\s*p(?![0-9])")
 _MASTER_RES_RE = re.compile(r"RESOLUTION=\d+x(\d+)", re.I)
 
@@ -542,7 +547,7 @@ def _zipper_walk(zipper, deadline):
     return text, None
 
 
-_walk_locks = _LRU(4000)
+_walk_locks = _LRU(1000)
 _walk_locks_g = threading.Lock()
 
 
@@ -715,7 +720,7 @@ def _wn_proxied():
 # language lives on the movie hub.
 _PSRCS_RE = re.compile(r"(?:var|const|let)\s+playerSources\s*=\s*"
                        r"(\[.*?\]);\s*(?:\n|var|const|let|function)", re.S)
-_wn_cache = _LRU(3000)                            # zipper -> (expires, direct_url)
+_wn_cache = _LRU(800)                            # zipper -> (expires, direct_url)
 
 
 def _wn_inner(u):
@@ -853,7 +858,7 @@ _ALL_BTN_RE = re.compile(
 _ICONS = {"icon-192.png": "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAAE4UlEQVR4nO3dwY0USRCF4ZwVtzlwXgxAWhvWgLUZA7ABCQMWN/ZQUqm2B4buflUZ70X+3xmhypi/I4sZBC+vrx8H8Kw/qh8A2QgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSD5UP4CL73//+dCv//z1x0VPkuVl2X/m99Fi3rdsT2sFdG40v7JUTEsENKebt1YoqXlAVekc9c6oZ0AO3bzVsqRuAXmmc9Qso1bfB/KvZ4Q85P2abKDEr0qPVRQfUGI6R+kZZV9h6fWM/CMEB5Q++l30QSKvsOiJvyPxOsvbQF3rGZlHCwsoccQPiTtgUkBxw31O1jFjAsoaqyjosBkBBQ30LClHDggoZZSnizi4e0ARQ7yO//GtA/If3wTmQ/ANyHxwMzmPwjQg55GVsB2IaUBI4RiQ7aetludY7AK6ekyfvny79Pe/lGFDXgHNGdCnL99yM3JryCugmXIbsmIU0PzPVugqslpCRgFVCc3IhEtA5Z+qrIbKx7WzCMhkHFmryGRoFgFZCWrIQX1AJp+ko5RV5DC6+oBspWRUi4B+g4beVxyQwxL+LedVVD5ANtC9nDMqVBlQ+afnCYYN1Y6RDfQwVtERAT2JjDZlASXeX2+ZNFQ4TDaQavFVREDnWLYhAjrNmquoJqAeL0A/VZVR1UjZQJdYZxUR0FUWudEI6FrtMyKgGRo3VBBQ4zfod0xYRSWDZQNN1e9GI6ACnRoioBptVhEBVWrQEAEVS19FBGQhNyMCMpLYEAF5iVtFH6ofAP/z7z9/VT/CY9hARuLqGWwgE4npbAioWG46G66wSun1DDZQlQbpbAhotjbpbAoC+vz1x5p/JejqdEr+02fegSZptnh2XGGX65rOhoAu1DudDVfYVVaoZ1RtoN7v0SXplLxBD66wcy2ydY64wk6zYD2DDXSKNdPZlAXU4zXIJJ2qF6DBFaYwqacWV9gzSGdXGVDiLWaYTuH9NbjCHmJYT7niKyxlCdmmU7t+RnlA/mzTMUFAv0Q696h/Bypfwj8VUY/D6NhAtyLS8WERkMmrdFY6DutnOFxhm/JxUM9zLDZQrax03BgFNP8iC03HZ/0MnytsvtB63BhtoDFrCUWnY7V+xhgvr68fq5/hlsOfyDy51TM8rzDDMTnwHItjQAhiGpDnp62Q7UBMAxrGI5vPeRS+AQ3vwU1jPgTrgIb9+K7mf3z3gEbCEC8ScfCAgEbIKM+VcuSMgEbOQE8RdNiYgEbUWBVZx0wKaKQN9wlxBwwLaASO+H6JR3P8YeqdOv3MNTGdTd4G2uUO/Ub0QYIDGuGj36QfIfgKO0q8ztLT2TQJaJOSUY90NtlX2I2IL0zEQ96v1Qbaea6iZulsega0cyipZTe75gFtqjLqnc5miYB2c0paoZvdWgEdnRvTUtEcrRvQjUd7WraYGwQESavvA2E+AoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAiS/wAopWLEgEoGGwAAAABJRU5ErkJggg==",
           "icon-512.png": "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"}
 
-_live_cache = _LRU(1500)                          # hub -> (expires, rows)
+_live_cache = _LRU(250)                          # hub -> (expires, rows)
 _live_lock = threading.Lock()
 
 
@@ -1086,7 +1091,7 @@ def _resolve_picks(picks, done=None, budget=LIST_BUDGET, wait=None):
 
 # ------------------------------------------------------------------ meta ---
 _CINEMETA = "https://v3-cinemeta.strem.io/meta/{t}/{id}.json"
-_cine_cache = _LRU(1500)
+_cine_cache = _LRU(400)
 _cine_lock = threading.Lock()
 
 
@@ -1122,7 +1127,7 @@ def _cinemeta_name(mtype, ext_id):
     return name
 
 
-_search_cache = _LRU(2000)                         # (title, want_movie) -> slug
+_search_cache = _LRU(500)                         # (title, want_movie) -> slug
 
 
 _SEO_SLUG = {"hindi", "dubbed", "dub", "episodes", "episode", "download",
@@ -1438,7 +1443,7 @@ def _site_search_slug(title, want_movie):
     return slug
 
 
-_calt_cache = _LRU(1500)
+_calt_cache = _LRU(400)
 
 
 _IMDB_SUG = "https://v2.sg.media-imdb.com/suggestion/{k}/{q}.json"
@@ -2506,12 +2511,15 @@ def _img_path(token):
 
 
 def _img_mem(token, hit):
-    while len(_img_cache) > 80:
-        _img_cache.pop(next(iter(_img_cache)), None)
+    try:
+        while len(_img_cache) > 40 or sum(len(v[0]) for v in list(_img_cache.values())) > 6 * 1024 * 1024:
+            _img_cache.pop(next(iter(_img_cache)), None)
+    except (RuntimeError, StopIteration):
+        pass
     _img_cache[token] = hit
 
 
-_img_fail = _LRU(3000)                       # token -> time of last failed upstream fetch
+_img_fail = _LRU(800)                       # token -> time of last failed upstream fetch
 _img_sem = threading.Semaphore(6)    # at most 6 poster fetches to the source at once
 
 
@@ -3311,7 +3319,7 @@ def _pl_put(url, text):
     if not text:
         return
     with _pl_lock:
-        if len(_pl_cache) > 300:
+        if len(_pl_cache) > 60:
             for k in list(_pl_cache)[:100]:
                 _pl_cache.pop(k, None)
         _pl_cache[url] = (time.time() + PL_TTL, text)
@@ -3607,7 +3615,7 @@ def _serve_download(handler, zipper, b64url, name, check=False):
             pass
 
 
-_wn_size_cache = _LRU(3000)                        # target -> (expires, size)
+_wn_size_cache = _LRU(800)                        # target -> (expires, size)
 
 
 def _wn_plain(url, rng, timeout):
@@ -4932,12 +4940,16 @@ def _restore_from_db():
             time.sleep(delay)
             delay = min(delay * 2, 120)
     _boot_from_db()
+    try:
+        import gc; gc.collect(); _malloc_trim()
+    except Exception:
+        pass
     _DB_READY.set()
     print("[rt2] state restored from DB", flush=True)
 
 
-MEM_SOFT_MB = _env_int("MEM_SOFT_MB", 450)    # above this: drop caches + return memory to the OS
-MEM_HARD_MB = _env_int("MEM_HARD_MB", 800)    # above this: also drop the poster memory cache
+MEM_SOFT_MB = _env_int("MEM_SOFT_MB", 170)    # above this: drop caches + return memory to the OS
+MEM_HARD_MB = _env_int("MEM_HARD_MB", 210)    # above this: also drop the poster memory cache
 
 
 def _mem_watch():
@@ -4945,11 +4957,11 @@ def _mem_watch():
     import gc
     n = 0
     while True:
-        time.sleep(30)
+        time.sleep(10)
         try:
             n += 1
             mb = _rss_mb()
-            if n % 10 == 1:
+            if n % 30 == 1:
                 print(f"[mem] rss={mb}MB threads={threading.active_count()} img={len(_img_cache)} "
                       f"live={len(_live_cache)} hls={len(_hls_cache)} wn={len(_wn_cache)}", flush=True)
             if mb > MEM_SOFT_MB:
@@ -4961,7 +4973,7 @@ def _mem_watch():
                 gc.collect()
                 _malloc_trim()
                 print(f"[mem] cleanup: {mb}MB -> {_rss_mb()}MB", flush=True)
-            elif n % 4 == 0:
+            elif n % 3 == 0:
                 _malloc_trim()
         except Exception as e:
             print("[mem] watch error:", repr(e), flush=True)
@@ -4992,6 +5004,27 @@ def _startup():
     threading.Thread(target=_posters, daemon=True).start()
 
 
+class _LimitedServer(ThreadingHTTPServer):
+    """At most MAX_CONN requests run at once (each one is a thread = RAM)."""
+    daemon_threads = True
+    request_queue_size = 128
+    _slots = threading.BoundedSemaphore(_env_int("MAX_CONN", 48))
+
+    def process_request(self, request, client_address):
+        self._slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def main():
     try:
         threading.stack_size(512 * 1024)       # many request threads: small stacks
@@ -5000,7 +5033,7 @@ def main():
     guard.start()                                                 # VIP keys + saved PROTECT mode (background)
     threading.Thread(target=_startup, daemon=True).start()        # port opens at once
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
-    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    srv = _LimitedServer(("0.0.0.0", port), Handler)
     print(f"[rt2] {ADDON_NAME} v{VERSION} | series={len(SERIES)} "
           f"movies={len(MOVIES)} rows={len(ROWS)} posters={len(POSTERS)}")
     print(f"[rt2] listening on 0.0.0.0:{port}")
