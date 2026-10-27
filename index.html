@@ -675,6 +675,27 @@ html.tv .pind{font-size:24px;padding:16px 26px}
 .pc .pi svg{filter:drop-shadow(0 1px 2px rgba(0,0,0,.7))}
 .player.ls .pt b{font-size:16px}
 html.tv .pg{width:60px;height:60px;top:12px;right:24px}
+/* ===== skip intro / recap / ending button (above the seek bar, right side) ===== */
+.psk{position:absolute;right:max(12px,env(safe-area-inset-right));bottom:12px;z-index:6;display:none;align-items:center;gap:8px;padding:10px 14px 10px 16px;border-radius:10px;border:1.5px solid rgba(255,255,255,.85);background:rgba(18,18,22,.78);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);color:#fff;font-family:inherit;font-size:14px;font-weight:700;line-height:1;cursor:pointer;white-space:nowrap;transition:bottom .25s,background .15s,color .15s,transform .15s}
+.psk.on{display:inline-flex;animation:pskin .22s ease-out}
+.player:not(.nc) .psk{bottom:88px}
+.psk:hover,.psk:focus-visible{background:#fff;color:#111}
+.psk:active{transform:scale(.96)}
+.psk .pi{width:20px;height:20px}
+.pskk,.pskh{display:none;font-size:11px;font-weight:700;opacity:.75;border:1px solid currentColor;border-radius:5px;padding:2px 5px}
+@media (hover:hover) and (pointer:fine){html:not(.tv) .pskk{display:inline}}
+html.tv .pskh{display:inline}
+.player.fs .psk,.player.ls .psk{font-size:15px;padding:11px 16px 11px 18px}
+.player.fs:not(.nc) .psk{bottom:104px}.player.ls:not(.nc) .psk{bottom:92px}
+html.tv .psk{font-size:24px;padding:16px 24px;border-width:3px;bottom:30px}
+html.tv .player:not(.nc) .psk{bottom:132px}
+html.tv .psk:focus{outline:4px solid var(--accent);outline-offset:3px;background:#fff;color:#111}
+.pskt{position:absolute;left:max(12px,env(safe-area-inset-left));bottom:12px;z-index:6;display:none;align-items:center;gap:12px;padding:9px 12px 9px 14px;border-radius:10px;background:rgba(18,18,22,.85);color:#fff;font-size:14px;font-weight:600;transition:bottom .25s}
+.pskt.on{display:flex;animation:pskin .22s ease-out}
+.pskt button{background:none;border:0;color:var(--accent);font-weight:800;font-size:14px;padding:4px 6px;cursor:pointer;font-family:inherit}
+.player:not(.nc) .pskt{bottom:88px}.player.fs:not(.nc) .pskt{bottom:104px}.player.ls:not(.nc) .pskt{bottom:92px}
+html.tv .pskt{font-size:22px}html.tv .pskt button{font-size:22px}html.tv .player:not(.nc) .pskt{bottom:132px}
+@keyframes pskin{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
 </style>
 </head>
 <body>
@@ -844,7 +865,7 @@ async function toggleFav(slug){if(!ME)return authModal();const on=!FAVS.includes
 function rail(title,list,more,mk){if(!mk)list=dedupe(list);return list.length?[h("h2",{class:"sec"},title,more?h("button",{class:"see",onclick:more},"See all →"):null),h("div",{class:"rail"},list.map(mk||(s=>card(s))))]:[]}
 function top10(title,list){list=dedupe(list).slice(0,10);return list.length>=5?[h("h2",{class:"sec"},title),h("div",{class:"rail t10r"},list.map((s,k)=>h("div",{class:"t10"},h("span",{class:"n"},String(k+1)),card(s))))]:[]}
 function dtap(box,video){let lt=0,lx=0;const hint=(side,txt)=>{const d=h("div",{class:"dtr "+side},h("span",{},txt));box.append(d);setTimeout(()=>d.remove(),650)};
-  box.addEventListener("touchend",e=>{if(e.touches.length||(e.target.closest&&e.target.closest(".countdown,.msg")))return;const t=e.changedTouches[0],r=box.getBoundingClientRect(),x=(t.clientX-r.left)/r.width,y=(t.clientY-r.top)/r.height,n=Date.now();
+  box.addEventListener("touchend",e=>{if(e.touches.length||(e.target.closest&&e.target.closest(".countdown,.msg,.psk,.pskt")))return;const t=e.changedTouches[0],r=box.getBoundingClientRect(),x=(t.clientX-r.left)/r.width,y=(t.clientY-r.top)/r.height,n=Date.now();
     if(y>.72){lt=0;return}
     if(n-lt<320&&Math.abs(t.clientX-lx)<70){lt=0;if(!video.duration)return;if(x<.4){video.currentTime=Math.max(0,video.currentTime-10);hint("l","\u00ab 10s");e.preventDefault()}else if(x>.6){video.currentTime=Math.min(video.duration,video.currentTime+10);hint("r","10s \u00bb");e.preventDefault()}}
     else{lt=n;lx=t.clientX}},{passive:false})}
@@ -1035,6 +1056,7 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
     getVids(s).then(vids=>{if(!alive())return;allVids=vids;setEpT(vids);if(META[s.slug]&&META[s.slug].p)setTimeout(()=>{if(alive())getVids(s).then(setEpT)},9000);drawEps(vids);const sn=+season,list=vids.filter(v=>+v.season===sn).map(v=>+v.episode).sort((a,b)=>a-b);
       const nx=list.find(x=>x>e);if(nx)nextEp=[sn,nx];else{const ns=[...new Set(vids.map(v=>+v.season))].sort((a,b)=>a-b).find(x=>x>sn);if(ns)nextEp=[ns,Math.min(...vids.filter(v=>+v.season===ns).map(v=>+v.episode))]}
       if(nextEp){nextBtn.style.display="";const nt=epTitle(vids.find(v=>+v.season===nextEp[0]&&+v.episode===nextEp[1]));nextBtn.textContent="Next episode · S"+nextEp[0]+" E"+nextEp[1]+(nt?" · "+nt:"")+" ›";nextBtn.onclick=()=>go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1])}})}
+  let skipC=[];api("/api/skip/"+slug+(s.movie?"":"/"+season+"/"+episode)).then(r=>{if(alive()&&r&&Array.isArray(r.segments))skipC=r.segments}).catch(()=>{});   /* never awaited: a missing answer just means no skip button */
   let data;try{data=await api("/api/watch/"+slug+(s.movie?"":"/"+season+"/"+episode))}catch(e){if(alive())msg.textContent="Server error. Please try again shortly.";return}
   if(!alive())return;
   const src=data.sources||[];if(!src.length){msg.textContent="No playable stream is available for this title yet.";return}
@@ -1102,9 +1124,17 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
     if(hls&&hls.subtitleTracks&&hls.subtitleTracks.length)r.push({label:"Subtitles",val:hls.subtitleTrack<0?"Off":(hls.subtitleTracks[hls.subtitleTrack]||{}).name||"On",opts:[{t:"Off",on:hls.subtitleTrack<0,f:()=>{hls.subtitleTrack=-1}},...hls.subtitleTracks.map((t,k)=>({t:t.name||t.lang||"Track "+(k+1),on:hls.subtitleTrack===k,f:()=>{hls.subtitleTrack=k}}))]});
     else r.push({label:"Subtitles",val:"Not available",opts:[]});
     r.push({label:"Picture mode",val:PICS[picNow][0],opts:Object.keys(PICS).map(k=>({t:PICS[k][0],on:k===picNow,f:()=>{setPic(k);pic.value=k}}))});
-    r.push({label:"Autoplay next",tog:{on:auto.checked,f:()=>{auto.checked=!auto.checked;store.set("auto",auto.checked?"1":"0")}}});return r};
-  playerUI(box,video,{show:nm(s),sub:()=>ttl.textContent,hasPrev:()=>!!prevBtn,prev:()=>prevBtn&&prevBtn.click(),hasNext:()=>!!nextEp,next:()=>nextEp&&go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1]),vids:()=>allVids,sn:+season,en:+episode,slug,rows});
+    r.push({label:"Autoplay next",tog:{on:auto.checked,f:()=>{auto.checked=!auto.checked;store.set("auto",auto.checked?"1":"0")}}});
+    [["sk_i","Skip intro & recap"],["sk_o","Skip ending"]].forEach(([k,lb])=>r.push({label:lb,val:skModeName(skMode(k)),opts:SK_MODES.map(([v,t])=>({t,on:skMode(k)===v,f:()=>{store.set(k,v)}}))}));
+    return r};
+  playerUI(box,video,{show:nm(s),sub:()=>ttl.textContent,hasPrev:()=>!!prevBtn,prev:()=>prevBtn&&prevBtn.click(),hasNext:()=>!!nextEp,next:()=>nextEp&&go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1]),vids:()=>allVids,sn:+season,en:+episode,slug,rows,skipCands:()=>skipC,autoNext:()=>auto.checked});
   play(cur)}
+
+/* ---------- skip intro / recap / ending: settings shared by the player and the account page ---------- */
+const SK_TOL=25; /* seconds: a database timestamp is only trusted when its episode length is this close to the video being played */
+const SK_MODES=[["btn","Show button"],["auto","Auto-skip"],["off","Off"]];
+const skMode=k=>{const v=store.get(k);return v==="auto"||v==="off"?v:"btn"};   /* k: "sk_i" = intro + recap, "sk_o" = ending */
+const skModeName=v=>(SK_MODES.find(m=>m[0]===v)||SK_MODES[0])[1];
 
 /* ---------- custom player controls (YouTube-style, portrait + landscape) ---------- */
 const PI={play:"M8 5v14l11-7z",pause:"M6 19h4V5H6v14zm8-14v14h4V5h-4z",prev:"M6 6h2v12H6zm3.5 6l8.5 6V6z",next:"M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z",gear:"M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z",fs:"M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z",xfs:"M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z",list:"M4 6h16v2H4zm0 5h16v2H4zm0 5h10v2H4z",chev:"M10 6L8.6 7.4 13.2 12l-4.6 4.6L10 18l6-6z",back:"M15.4 7.4L14 6l-6 6 6 6 1.4-1.4L10.8 12z",ok:"M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z",x:"M19 6.4L17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z",rew:"M12 5V1L7 6l5 5V7c3.3 0 6 2.7 6 6s-2.7 6-6 6-6-2.7-6-6H4c0 4.4 3.6 8 8 8s8-3.6 8-8-3.6-8-8-8z",vol:"M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z",mute:"M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0021 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 003.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"};
@@ -1134,8 +1164,39 @@ function playerUI(box,video,C){
   const row=h("div",{class:"pr"},prevB,playB,nextB,vol,h("span",{class:"psp"}),epsB,fsB);
   const pc=h("div",{class:"pc"},top,gear,h("div",{class:"pbt"},bar,tm,row)),mn=h("div",{class:"pm"}),pe=h("div",{class:"pe"});
   box.append(pind,pc,mn,pe);
-  function toggle(w){const el=w==="mn"?mn:pe,ab=document.activeElement;if(open===el){close();return}close();open=el;lastBtn=ab;if(w==="mn")menu(null);else eps();el.classList.add("on");poke();if(isTV())setTimeout(()=>{const f=el.querySelector(".ep.cur")||el.querySelector(".mr")||el.querySelector("button");if(f)f.focus()},80)}
-  function close(){const was=open;if(open)open.classList.remove("on");open=null;if(was&&isTV()&&lastBtn&&lastBtn.isConnected&&lastBtn!==document.body)setTimeout(()=>{if(!open)lastBtn.focus()},0)}
+  /* ---- skip intro / recap / ending ---- */
+  const SKL={intro:"Skip Intro",recap:"Skip Recap",outro:"Skip Ending"},SKN={intro:"Intro",recap:"Recap",outro:"Ending"};
+  const skLab=h("span",{}),skK=h("span",{class:"pskk"},"S"),skH=h("span",{class:"pskh"},"OK");
+  const skipB=h("button",{class:"psk",type:"button",tabindex:"-1","aria-label":"Skip",title:"Skip (S)",onclick:e=>{e.stopPropagation();skipNow()}},skLab,skK,skH,I("next"));
+  const skToast=h("div",{class:"pskt"}),SKS={done:new Set(),seg:null,key:"",pk:{},tt:0};
+  box.append(skipB,skToast);
+  function skPicks(){const d=video.duration,cs=C.skipCands?C.skipCands():[],key=d+"|"+cs.length;if(SKS.key===key)return SKS.pk;
+    const pk={},sc={};
+    cs.forEach(c=>{if(!(c.end>c.start)||c.start>=d-1)return;if(c.len>0&&Math.abs(c.len-d)>SK_TOL)return;
+      const q=(c.rank||0)*1e4+(c.len>0?Math.abs(c.len-d):SK_TOL);   /* provider order first, then the closest episode length */
+      if(sc[c.type]===undefined||q<sc[c.type]){sc[c.type]=q;pk[c.type]=c}});
+    SKS.key=key;SKS.pk=pk;return pk}
+  function skHide(){if(skipB.classList.contains("on")){skipB.classList.remove("on");skipB.tabIndex=-1}SKS.seg=null}
+  function skNote(txt,undo){clearTimeout(SKS.tt);skToast.replaceChildren(h("span",{},txt),h("button",{type:"button",onclick:e=>{e.stopPropagation();skToast.classList.remove("on");undo()}},"Undo"));skToast.classList.add("on");SKS.tt=setTimeout(()=>skToast.classList.remove("on"),5000)}
+  function skDo(seg,auto){const d=video.duration;SKS.done.add(seg.type+seg.start);skHide();
+    if(seg.type==="outro"&&seg.end>=d-3&&C.hasNext()&&(!auto||C.autoNext())){C.next();return}   /* ending runs to the very end: go straight to the next episode */
+    video.currentTime=Math.min(seg.end,d-.3);
+    if(auto)skNote(SKN[seg.type]+" skipped",()=>{SKS.done.add(seg.type+seg.start);video.currentTime=Math.max(0,seg.start)});
+    poke()}
+  function skipNow(){if(SKS.seg)skDo(SKS.seg,false)}
+  function skRefresh(){const d=video.duration;
+    if(!d||!isFinite(d)||video.ended||open||drag||!C.skipCands){skHide();return}
+    const t=video.currentTime,pk=skPicks();let seg=null;
+    for(const k of ["intro","recap","outro"]){const c=pk[k];if(!c)continue;const e=Math.min(c.end,d);if(t>=c.start-.25&&t<e-.6){seg=Object.assign({},c,{end:e});break}}
+    if(!seg){skHide();return}
+    const mode=skMode(seg.type==="outro"?"sk_o":"sk_i");
+    if(mode==="off"){skHide();return}
+    if(mode==="auto"&&!SKS.done.has(seg.type+seg.start)&&!video.seeking){skDo(seg,true);return}
+    const fresh=!skipB.classList.contains("on");SKS.seg=seg;skLab.textContent=SKL[seg.type];
+    if(fresh){skipB.classList.add("on");skipB.tabIndex=0}}
+  ["timeupdate","seeked","durationchange","loadedmetadata"].forEach(n=>video.addEventListener(n,skRefresh));
+  function toggle(w){const el=w==="mn"?mn:pe,ab=document.activeElement;if(open===el){close();return}close();open=el;lastBtn=ab;if(w==="mn")menu(null);else eps();el.classList.add("on");skRefresh();poke();if(isTV())setTimeout(()=>{const f=el.querySelector(".ep.cur")||el.querySelector(".mr")||el.querySelector("button");if(f)f.focus()},80)}
+  function close(){const was=open;if(open)open.classList.remove("on");open=null;skRefresh();if(was&&isTV()&&lastBtn&&lastBtn.isConnected&&lastBtn!==document.body)setTimeout(()=>{if(!open)lastBtn.focus()},0)}
   function up(){const d=video.duration||0,t=video.currentTime||0;if(!drag){const f=d?t/d*100+"%":"0";fil.style.width=f;th.style.left=f;tc.textContent=T(t)}td.textContent=T(d);let b=0;try{for(let i=0;i<video.buffered.length;i++)if(video.buffered.start(i)<=t&&video.buffered.end(i)>=t)b=video.buffered.end(i)}catch(e){}buf.style.width=d?b/d*100+"%":"0";swap(playB,video.paused?"play":"pause");sub.textContent=C.sub()||C.show;prevB.style.visibility=C.hasPrev()?"":"hidden";nextB.style.visibility=C.hasNext()?"":"hidden";epsB.style.display=C.vids().length?"":"none"}
   ["timeupdate","progress","durationchange","play","pause","loadedmetadata"].forEach(n=>video.addEventListener(n,up));video.addEventListener("play",poke);video.addEventListener("pause",poke);
   const fr=e=>{const r=bar.getBoundingClientRect();return Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))};
@@ -1144,7 +1205,7 @@ function playerUI(box,video,C){
   bar.onpointermove=e=>{if(drag)mv(e)};
   bar.onpointerup=e=>{if(!drag)return;drag=false;bar.classList.remove("drag");video.currentTime=fr(e)*video.duration;poke()};
   bar.onpointercancel=()=>{drag=false;bar.classList.remove("drag")};
-  const UI=".pb,.ps,.pm,.pe,.pv,.countdown,.msg";
+  const UI=".pb,.ps,.pm,.pe,.pv,.countdown,.msg,.psk,.pskt";
   box.addEventListener("click",e=>{if(e.target.closest(UI))return;if(open){close();return}
     if(fine()){video.paused?video.play():video.pause();poke();return}
     const r=box.getBoundingClientRect(),x=(e.clientX-r.left)/r.width,side=x<.35?"l":x>.65?"r":"c",n=Date.now();
@@ -1169,6 +1230,7 @@ function playerUI(box,video,C){
     else if(k==="f"||k==="F")goFs();
     else if(k==="Home")video.currentTime=0;else if(k==="End"&&video.duration)video.currentTime=video.duration-1;
     else if(/^[0-9]$/.test(k)&&video.duration)video.currentTime=video.duration*(+k)/10;
+    else if((k==="s"||k==="S")&&!e.shiftKey&&skipB.classList.contains("on"))skipNow();
     else if(k==="N"&&e.shiftKey&&C.hasNext())C.next();else if(k==="P"&&e.shiftKey&&C.hasPrev())C.prev();
     else used=false;
     if(used){e.preventDefault();poke()}};
@@ -1202,12 +1264,15 @@ function accountPage(){killPlayer();
   const lsel=h("select",{"aria-label":"Preferred language",onchange:e=>{const v=e.target.value;if(v)store.set("lang",v);else store.del("lang")}},h("option",{value:""},"Any"),langs.map(l=>h("option",{value:l,selected:l===pref},l)));
   const who=ME?h("div",{class:"acp"},h("div",{class:"acav"},(ME.username[0]||"?").toUpperCase()),h("div",{},h("b",{},"Hi, "+ME.username),h("small",{},"Signed in \u00b7 progress is synced")))
     :h("div",{class:"acp"},h("div",{class:"acav"},"?"),h("div",{},h("b",{},"Welcome"),h("small",{},"Sign in to sync progress and My List")));
+  const skSel=(k,lb)=>h("select",{"aria-label":lb,onchange:e=>store.set(k,e.target.value)},SK_MODES.map(([v,t])=>h("option",{value:v,selected:v===skMode(k)},t)));
   const inst=()=>{if(installEvt){installEvt.prompt();installEvt=null}else alert("To install: open your browser menu and choose \u201cAdd to Home screen\u201d (on iPhone: Share \u2192 Add to Home Screen).")};
   const kids=[h("h2",{class:"sec"},"Account"),
     h("div",{class:"acbox"},who,ME?null:h("button",{class:"pri acbtn",onclick:authModal},"Sign in")),
     h("div",{class:"acbox"},
       row("Dark theme",tgl(document.documentElement.dataset.theme==="dark",()=>{const d=document.documentElement.dataset.theme!=="dark";setTheme(d?"dark":"light",true);return d})),
       row("Auto-play next episode",tgl(store.get("auto")!=="0",()=>{const v=store.get("auto")==="0";store.set("auto",v?"1":"0");return v})),
+      row("Skip intro & recap",skSel("sk_i","Skip intro and recap")),
+      row("Skip ending",skSel("sk_o","Skip ending")),
       row("Preferred language",lsel)),
     h("div",{class:"acbox"},ME?h("button",{class:"acli acact",onclick:accountModal},h("span",{},"Change password"),h("span",{},"\u203a")):null,h("button",{class:"acli acact",onclick:inst},h("span",{},"Install app"),h("span",{},"\u203a")))];
   if(ME)kids.push(h("button",{class:"btn acout",onclick:async()=>{try{await api("/api/logout",{})}catch(e){}store.del("token");ME=null;PROG=[];FAVS=[];go("#/");route()}},"Sign out"));
@@ -1381,7 +1446,7 @@ document.addEventListener("keydown",function(e){
   if(v&&(k===228||k===176||ky==="MediaTrackNext")){var nx=document.querySelector(".nx");if(nx&&visible(nx)){e.preventDefault();nx.click()}return}
   /* video focused */
   if(isVideo){
-    if(k===13||k===23||k===32||ky==="Enter"){e.preventDefault();toggle(ae);return}
+    if(k===13||k===23||k===32||ky==="Enter"){e.preventDefault();var pw0=up(ae,".player"),sk0=pw0&&k!==32?pw0.querySelector(".psk.on"):null;if(sk0){sk0.click();return}toggle(ae);return}
     if(k===37||k===39){e.preventDefault();var s=step(k);seek(ae,k===37?-s:s);return}
     if(k===70||k===82||k===93||k===457||ky==="ContextMenu"||ky==="Info"){e.preventDefault();fullscreen(ae);return}
     if(k===40||ky==="ArrowDown"){var pl2=up(ae,".player");if(pl2&&pl2.querySelector(".pc")){e.preventDefault();try{pl2.dispatchEvent(new Event("pokeui"))}catch(x){}setTimeout(function(){var b=pl2.querySelector(".pp");if(b&&visible(b))focusEl(b)},40);return}}

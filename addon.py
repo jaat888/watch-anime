@@ -63,6 +63,7 @@ import applog
 applog.install()          # keep every printed line + crashes in the SQL `logs` table
 import accounts
 import genres as G
+import skiptimes
 import requests
 from curl_cffi import requests as creq
 
@@ -3001,6 +3002,23 @@ def api_watch(slug, season, episode):
     return {"name": rec["name"], "sources": out}
 
 
+def api_skip(slug, season, episode):
+    """Skip-intro / skip-ending candidates for the website player (see skiptimes.py).
+    Never raises and never touches the stream path: no data -> {"segments": []}."""
+    rec = SHOWS.get(slug)
+    if not rec:
+        return {"segments": []}
+    try:
+        return skiptimes.lookup(
+            _tmdb_clean(rec["name"]), season or 1, episode or 1, bool(rec["movie"]), _tmdb_get,
+            log=lambda prov, msg: applog.log_once(
+                "skip-" + prov, 600, "warn", "skip",
+                f"skip-times via {prov} failed ({msg}) - same error is hidden for 10 min"))
+    except Exception as e:
+        applog.log_once("skip-" + type(e).__name__, 600, "error", "skip", f"skip lookup crashed: {e}")
+        return {"segments": []}
+
+
 # ---------------------------------------------------- /mq HLS rewriter -----
 _B64_RE = r"[A-Za-z0-9_\-]"
 _URL_ATTR_RE = re.compile(r'URI="([^"]+)"')
@@ -3763,6 +3781,10 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/api/watch/([a-z0-9_]+)(?:/(\d+)/(\d+))?$", path)
             if m:
                 self._send(api_watch(m.group(1), m.group(2), m.group(3)))
+                return
+            m = re.match(r"^/api/skip/([a-z0-9_]+)(?:/(\d+)/(\d+))?$", path)
+            if m:
+                self._send(api_skip(m.group(1), int(m.group(2) or 1), int(m.group(3) or 1)))
                 return
             if path == "/manifest.json":
                 self._send(handle_manifest(_public_base_holder["base"]))
