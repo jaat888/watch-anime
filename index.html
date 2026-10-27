@@ -171,6 +171,7 @@ video{width:100%;height:100%;display:block}
 .box .back{text-align:center;padding:6px 0;margin:0;white-space:normal}
 .box .pri{padding:13px 16px}
 .err{color:var(--accent);font-size:13px;min-height:1em}
+.tvbox{max-width:760px!important;text-align:center}.tvrow{display:flex;gap:30px;align-items:center;justify-content:center;flex-wrap:wrap}.tvqr{background:#fff;border-radius:14px;min-width:200px;min-height:200px;display:flex;align-items:center;justify-content:center;color:#555}.tvside{font-size:20px;line-height:1.7;text-align:left;max-width:300px}.tvcode{font-size:42px;font-weight:800;letter-spacing:9px;margin-top:10px}.tvnote{font-size:15px;color:var(--dim);text-align:center;min-height:1.2em}
 footer{text-align:center;color:var(--dim);font-size:13px;padding:30px 16px 96px}footer a{color:var(--accent);text-decoration:none}
 
 
@@ -747,10 +748,156 @@ let SHOWS=null,NOW=0,POP=[],TREND=[],TRENDD=[],TRENDM=[],TOPR=[],TOPM=[],RECS=[]
 const META={},INFO={};
 const LITE=document.documentElement.classList.contains("lite");
 const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}},del(k){try{localStorage.removeItem(k)}catch(e){}}};
+/* device id: a random id this browser keeps; the server counts guest videos / rates per device as well as per IP */
+const DID=(()=>{let d=store.get("did");if(!d||!/^[A-Za-z0-9_-]{8,40}$/.test(d)){const a="abcdefghijklmnopqrstuvwxyz0123456789";d="";try{const u=new Uint8Array(20);crypto.getRandomValues(u);for(const x of u)d+=a[x%36]}catch(e){for(let i=0;i<20;i++)d+=a[Math.random()*36|0]}store.set("did",d)}return d})();
+const real=a=>(a||[]).filter(x=>!x.z);   /* z:1 = fake anime for bots (honeypot), never shown */
 function h(tag,a,...kids){const el=document.createElement(tag);for(const[k,v]of Object.entries(a||{})){if(k==="class")el.className=v;else if(k.startsWith("on"))el.addEventListener(k.slice(2),v);else if(v===true)el.setAttribute(k,"");else if(v!==false&&v!=null)el.setAttribute(k,v)}for(const c of kids.flat())if(c!=null)el.append(c.nodeType?c:document.createTextNode(c));return el}
-async function api(url,body){const o={headers:{}},t=store.get("token");if(t)o.headers.Authorization="Bearer "+t;
+async function api(url,body){const o={headers:{"X-Device":DID}},t=store.get("token");if(t)o.headers.Authorization="Bearer "+t;
+  const cp=capToken();if(cp)o.headers["X-Captcha"]=cp;
   if(body){o.method="POST";o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body)}
-  const r=await fetch(url,o);let j={};try{j=await r.json()}catch(e){}if(!r.ok){const e=new Error(j.error||r.status);e.status=r.status;throw e}return j}
+  const r=await fetch(url,o);let j={};try{j=await r.json()}catch(e){}if(!r.ok){const e=new Error(j.error||r.status);e.status=r.status;e.open=j.open;e.signin=j.signin;e.busy=j.busy;e.captcha=j.captcha;throw e}return j}
+/* game captcha (Step 8): the server only asks when something looks unusual (403 {captcha:true}).
+   The game code (/captcha.js) is loaded only then. A pass token (30 min, tied to the IP) rides along in header X-Captcha. */
+let CAPT="",CAPX=0,CAPP=null;
+try{const c=JSON.parse(store.get("cap")||"null");if(c&&c.t&&c.x>Date.now()){CAPT=c.t;CAPX=c.x}}catch(e){}
+function capToken(){if(CAPT&&CAPX>Date.now())return CAPT;CAPT="";return ""}
+function capForget(){CAPT="";CAPX=0;store.del("cap")}
+function loadCap(){return new Promise((ok,no)=>{if(window.CapGame)return ok();const sc=document.createElement("script");sc.src="/captcha.js?v=9";sc.onload=ok;sc.onerror=()=>{sc.remove();no(new Error("captcha script"))};document.head.append(sc)})}
+function solveCaptcha(){   /* -> Promise<true when passed>. One game at a time: everyone who asks waits for the same one. */
+  if(CAPP)return CAPP;
+  const p=(async()=>{try{let r;if(onTV())r=await tvPair();else{await loadCap();r=await CapGame.modal({headers:{"X-Device":DID}})}
+      if(r&&r.token){CAPT=r.token;CAPX=Date.now()+Math.max(60,(r.ttl||1800)-20)*1000;store.set("cap",JSON.stringify({t:CAPT,x:CAPX}));return true}return false}
+    catch(e){return false}finally{if(CAPP===p)CAPP=null}})();
+  CAPP=p;return p}
+addEventListener("hashchange",()=>{if(CAPP&&window.CapGame){CapGame.closeAll();CAPP=null}});   /* left the page: the game goes away too */
+/* TV pass (Step 9): a TV has no touch, so a PHONE plays the game for it.  The TV shows a QR + a 6-letter code,
+   the phone opens /tv?c=CODE, wins the game, and the TV (asking every 2 s) gets a pass token (hours, tied to the TV's IP). */
+/*QR-BEGIN*/
+/* tiny QR generator (no library): byte mode, error level M, versions 1-10 (up to 213 bytes). qrMake(text) -> array of rows of 0/1, or null if too long. */
+function qrMake(text){
+  var i,j,k,b=[],s=unescape(encodeURIComponent(String(text)));
+  for(i=0;i<s.length;i++)b.push(s.charCodeAt(i));
+  /* [total codewords, ec codewords per block, blocks] for level M, versions 1..10; alignment centres */
+  var T=[[26,10,1],[44,16,1],[70,26,1],[100,18,2],[134,24,2],[172,16,4],[196,18,4],[242,22,4],[292,22,5],[346,26,5]];
+  var AL=[[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50]];
+  var v=0,D;
+  for(v=1;v<=10;v++){var t=T[v-1];D=t[0]-t[1]*t[2];if(b.length+(v<10?2:3)<=D)break}
+  if(v>10)return null;
+  var tt=T[v-1],nb=tt[2],ecl=tt[1],n=17+4*v;
+  /* bit stream: mode 0100, length, bytes, terminator, padding */
+  var bits=[];function put(x,len){for(var q=len-1;q>=0;q--)bits.push((x>>>q)&1)}
+  put(4,4);put(b.length,v<10?8:16);for(i=0;i<b.length;i++)put(b[i],8);
+  for(i=0;i<4&&bits.length<D*8;i++)bits.push(0);
+  while(bits.length%8)bits.push(0);
+  for(k=0xEC;bits.length<D*8;k^=0xEC^0x11)put(k,8);
+  var dc=[];for(i=0;i<D;i++){var by=0;for(j=0;j<8;j++)by=by*2+bits[i*8+j];dc.push(by)}
+  /* Reed-Solomon over GF(256) */
+  var EX=[],LG=[];for(i=0,k=1;i<256;i++){EX[i]=k;LG[k]=i;k<<=1;if(k&256)k^=0x11D}
+  function mul(x,y){return x&&y?EX[(LG[x]+LG[y])%255]:0}
+  var g=[1];for(i=0;i<ecl;i++){var h=[];for(j=0;j<g.length+1;j++)h.push(0);for(j=0;j<g.length;j++){h[j]^=g[j];h[j+1]^=mul(g[j],EX[i])}g=h}
+  var short=Math.floor(D/nb),longN=D%nb,blocks=[],ecs=[],pos=0;
+  for(i=0;i<nb;i++){
+    var len=short+(i>=nb-longN?1:0),d=dc.slice(pos,pos+len);pos+=len;
+    var r=[];for(j=0;j<ecl;j++)r.push(0);
+    for(j=0;j<d.length;j++){var f=d[j]^r[0];r.shift();r.push(0);if(f)for(k=0;k<ecl;k++)r[k]^=mul(g[k+1],f)}
+    blocks.push(d);ecs.push(r)}
+  var out=[];
+  for(i=0;i<short+1;i++)for(j=0;j<nb;j++)if(i<blocks[j].length)out.push(blocks[j][i]);
+  for(i=0;i<ecl;i++)for(j=0;j<nb;j++)out.push(ecs[j][i]);
+  /* matrix */
+  var M=[],F=[];for(i=0;i<n;i++){M.push([]);F.push([]);for(j=0;j<n;j++){M[i].push(0);F[i].push(0)}}
+  function set(y,x,val){if(y>=0&&x>=0&&y<n&&x<n){M[y][x]=val?1:0;F[y][x]=1}}
+  function finder(y,x){for(var dy=-1;dy<=7;dy++)for(var dx=-1;dx<=7;dx++){var e=dy>=0&&dy<=6&&dx>=0&&dx<=6&&(dy==0||dy==6||dx==0||dx==6||(dy>=2&&dy<=4&&dx>=2&&dx<=4));set(y+dy,x+dx,e)}}
+  finder(0,0);finder(0,n-7);finder(n-7,0);
+  for(i=8;i<n-8;i++){set(6,i,i%2==0);set(i,6,i%2==0)}
+  var al=AL[v-1];
+  for(i=0;i<al.length;i++)for(j=0;j<al.length;j++){
+    if((i==0&&j==0)||(i==0&&j==al.length-1)||(i==al.length-1&&j==0))continue;
+    for(var dy=-2;dy<=2;dy++)for(var dx=-2;dx<=2;dx++)set(al[i]+dy,al[j]+dx,Math.max(Math.abs(dy),Math.abs(dx))!=1)}
+  set(n-8,8,1);
+  for(i=0;i<9;i++){if(!F[8][i])set(8,i,0);if(!F[i][8])set(i,8,0)}
+  for(i=0;i<8;i++){set(8,n-1-i,0);set(n-1-i,8,0)}
+  if(v>=7){var vi=v;for(i=0;i<12;i++)vi=(vi<<1)^((vi>>>11)*0x1F25);var vb=(v<<12)|(vi&0xFFF);
+    for(i=0;i<18;i++){var bt=(vb>>>i)&1,a=n-11+i%3,c=Math.floor(i/3);set(c,a,bt);set(a,c,bt)}}
+  /* data placement (zig-zag from the bottom right) */
+  var dp=[],up=1,col,y,x,idx=0;
+  for(col=n-1;col>0;col-=2){if(col==6)col=5;
+    for(var rr=0;rr<n;rr++){y=up?n-1-rr:rr;for(var cc=0;cc<2;cc++){x=col-cc;if(!F[y][x])dp.push([y,x])}}
+    up=!up}
+  var total=out.length*8;
+  function bitAt(q){return q<total?(out[q>>3]>>>(7-(q&7)))&1:0}
+  var masks=[function(y,x){return (y+x)%2==0},function(y,x){return y%2==0},function(y,x){return x%3==0},function(y,x){return (y+x)%3==0},
+    function(y,x){return (Math.floor(y/2)+Math.floor(x/3))%2==0},function(y,x){return (y*x)%2+(y*x)%3==0},
+    function(y,x){return ((y*x)%2+(y*x)%3)%2==0},function(y,x){return ((y+x)%2+(y*x)%3)%2==0}];
+  function fmt(mk){var d=(0<<3)|mk,r=d<<10;for(var q=14;q>=10;q--)if((r>>>q)&1)r^=0x537<<(q-10);return ((d<<10)|r)^0x5412}
+  function build(mk){
+    var R=[];for(var a=0;a<n;a++)R.push(M[a].slice(0));
+    for(var q=0;q<dp.length;q++){var yy=dp[q][0],xx=dp[q][1];R[yy][xx]=bitAt(q)^(masks[mk](yy,xx)?1:0)}
+    var f=fmt(mk);
+    for(var z=0;z<15;z++){var bt=(f>>>z)&1,y1,x1,y2,x2;
+      if(z<6){y1=z;x1=8}else if(z<8){y1=z+1;x1=8}else{y1=8;x1=z==8?7:14-z}
+      R[y1][x1]=bt;
+      if(z<8){y2=8;x2=n-1-z}else{y2=n-15+z;x2=8}
+      R[y2][x2]=bt}
+    R[n-8][8]=1;return R}
+  function penalty(R){
+    var p=0,a,c,run,dark=0;
+    for(a=0;a<n;a++){for(var dir=0;dir<2;dir++){run=1;
+      for(c=1;c<n;c++){var cur=dir?R[c][a]:R[a][c],prv=dir?R[c-1][a]:R[a][c-1];
+        if(cur==prv){run++;if(run==5)p+=3;else if(run>5)p++}else run=1}}}
+    for(a=0;a<n-1;a++)for(c=0;c<n-1;c++){var s4=R[a][c]+R[a][c+1]+R[a+1][c]+R[a+1][c+1];if(s4==0||s4==4)p+=3}
+    var pat=[1,0,1,1,1,0,1,0,0,0,0],pat2=pat.slice(0).reverse();
+    for(a=0;a<n;a++)for(c=0;c+11<=n;c++){var m1=1,m2=1,m3=1,m4=1;
+      for(var w=0;w<11;w++){if(R[a][c+w]!=pat[w])m1=0;if(R[a][c+w]!=pat2[w])m2=0;if(R[c+w][a]!=pat[w])m3=0;if(R[c+w][a]!=pat2[w])m4=0}
+      p+=40*(m1+m2+m3+m4)}
+    for(a=0;a<n;a++)for(c=0;c<n;c++)dark+=R[a][c];
+    p+=Math.floor(Math.abs(dark*20-n*n*10)/(n*n))*10;
+    return p}
+  var best=null,bp=1e9;
+  for(var mk=0;mk<8;mk++){var R=build(mk),pp=penalty(R);if(pp<bp){bp=pp;best=R}}
+  return best}
+/*QR-END*/
+const onTV=()=>/(^|\s)tv(\s|$)/.test(document.documentElement.className);
+function qrCanvas(text,px){const m=qrMake(text);if(!m)return null;const n=m.length,q=4,cell=Math.max(3,Math.floor(px/(n+2*q))),sz=cell*(n+2*q),cv=document.createElement("canvas");cv.width=cv.height=sz;const x=cv.getContext("2d");x.fillStyle="#fff";x.fillRect(0,0,sz,sz);x.fillStyle="#000";for(let y=0;y<n;y++)for(let c=0;c<n;c++)if(m[y][c])x.fillRect((c+q)*cell,(y+q)*cell,cell,cell);cv.style.cssText="width:"+sz+"px;height:"+sz+"px;border-radius:12px;image-rendering:pixelated;display:block";return cv}
+function tvPair(){   /* -> Promise<{token,ttl} | null (Back pressed)> */
+  return new Promise(resolve=>{
+    let dead=false,pid="",timer=0,exp=0;
+    const qrBox=h("div",{class:"tvqr"},"…"),codeEl=h("div",{class:"tvcode"}),note=h("div",{class:"tvnote"},"Making the QR code…");
+    const back=h("button",{class:"btn",onclick:()=>done(null)},"Back");
+    const m=modal(h("b",{style:"font-size:24px"},"One quick game on your phone"),
+      h("div",{class:"tvrow"},qrBox,h("div",{class:"tvside"},h("div",null,"1. Point your phone camera at the QR"),h("div",null,"2. Win the little game"),h("div",null,"3. This TV starts by itself"),codeEl)),note,back);
+    m.firstChild.classList.add("tvbox");
+    const esc=e=>{if(e.key==="Escape"||e.key==="Backspace"||e.key==="BrowserBack"||e.key==="GoBack"||e.keyCode===4){e.preventDefault();done(null)}};
+    document.addEventListener("keydown",esc);m.addEventListener("click",e=>{if(e.target===m)done(null)});
+    function done(v){if(dead)return;dead=true;clearTimeout(timer);document.removeEventListener("keydown",esc);m.remove();resolve(v)}
+    addEventListener("hashchange",()=>done(null),{once:true});
+    async function fresh(){
+      let j=null,st=0;try{j=await api("/api/tv/new",{})}catch(e){st=e.status||0}
+      if(dead)return;
+      if(!j||!j.pid){note.textContent=st===429?"Wait a moment, a new QR is coming…":"Network problem, trying again…";timer=setTimeout(fresh,st===429?8000:4000);return}
+      pid=j.pid;exp=Date.now()+(j.ttl||120)*1000;
+      const cv=qrCanvas(location.origin+"/tv?c="+j.code,300);
+      if(cv)qrBox.replaceChildren(cv);else qrBox.textContent="";
+      codeEl.textContent=j.code;note.textContent="No camera? On your phone open "+location.host+"/tv and type the code.";
+      try{back.focus()}catch(e){}
+      timer=setTimeout(poll,2000)}
+    async function poll(){
+      if(dead)return;
+      let r=null,st=0;try{r=await api("/api/tv/poll",{pid})}catch(e){st=e.status||0}
+      if(dead)return;
+      if(r&&r.state==="ok"){done({token:r.token,ttl:r.ttl});return}
+      if((r&&r.state==="gone")||Date.now()>exp){fresh();return}
+      timer=setTimeout(poll,st===429?6000:2000)}
+    fresh()})}
+/* video links: the server wants the anime's page opened first. If it says so (after a restart, or a direct link) open it quietly and ask again.
+   If it wants a captcha: play the game, then ask again (a stale pass token is dropped first). */
+async function watchApi(s,season,episode){const u="/api/watch/"+s.slug+(s.movie?"":"/"+season+"/"+episode);
+  for(let tries=0;;tries++){
+    try{return await api(u)}
+    catch(e){
+      if(e.status===403&&e.open&&tries<2){try{await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json")}catch(_){}continue}
+      if(e.status===403&&e.captcha&&tries<3){capForget();if(await solveCaptcha())continue;e.cancelled=true}
+      throw e}}}
 const go=x=>{location.hash=x};
 let WTOK=0,curVideo=null;
 let wdT=0;function killPlayer(){WTOK++;clearInterval(wdT);clearInterval(saveTimer);clearInterval(heroTimer);clearTimeout(heroTimer);clearInterval(nextTimer);if(hls){hls.destroy();hls=null}if(curVideo){try{curVideo.pause();curVideo.removeAttribute("src");curVideo.load()}catch(e){}curVideo=null}}
@@ -780,7 +927,10 @@ function authModal(){let mode="login";
   const title=h("b",{style:"font-size:18px"},"Sign in"),sw=h("button",{class:"back",style:"margin:0"},"New here? Create an account"),ok=h("button",{class:"pri"},"Sign in");
   const m=modal(title,u,p,err,ok,sw);
   sw.onclick=()=>{mode=mode==="login"?"signup":"login";title.textContent=ok.textContent=mode==="login"?"Sign in":"Create account";sw.textContent=mode==="login"?"New here? Create an account":"Have an account? Sign in"};
-  ok.onclick=async()=>{err.textContent="";try{const j=await api("/api/"+mode,{username:u.value.trim(),password:p.value});store.set("token",j.token);m.remove();await loadMe();route()}catch(e){err.textContent=e.message}};
+  ok.onclick=async()=>{err.textContent="";try{
+    if(mode==="signup"&&onTV()&&!capToken()&&!await solveCaptcha()){err.textContent="Creating an account on a TV needs the phone check (QR).";return}   /* Step 9: signup on TV = QR every time there is no pass */
+    let j;for(let t=0;;t++){try{j=await api("/api/"+mode,{username:u.value.trim(),password:p.value});break}catch(e){if(e.status===403&&e.captcha&&t<2){capForget();if(await solveCaptcha())continue;throw new Error(onTV()?"Scan the QR with your phone to continue.":"Please finish the quick game to continue.")}throw e}}
+    store.set("token",j.token);m.remove();await loadMe();route()}catch(e){err.textContent=e.message}};
   p.onkeydown=e=>{if(e.key==="Enter")ok.click()};u.focus()}
 function accountModal(){
   const o=h("input",{class:"in",type:"password",placeholder:"Current password",autocomplete:"current-password"}),n=h("input",{class:"in",type:"password",placeholder:"New password (min 6)",autocomplete:"new-password"}),msg=h("div",{class:"err"});
@@ -797,19 +947,21 @@ const skHome=()=>[h("div",{class:"hero sk","aria-busy":"true"}),...skRail(),...s
 const skShow=()=>[h("div",{class:"back"},"\u00a0"),h("div",{class:"hero sk",style:"min-height:230px"}),h("h2",{class:"sec"},h("span",{class:"sk sk-h"})),h("div",{class:"eps"},Array.from({length:14},()=>h("div",{class:"ep sk"})))];
 const setLists=j=>{TRENDM=j.trending_movies||[];TOPR=j.top_rated||[];TOPM=j.top_movies||[];RECS=j.recent||[];RECM=j.recent_movies||[]};
 let sig="";const mkSig=j=>(j.shows||[]).length+"|"+(j.trending||[]).slice(0,30).join(",")+"|"+(j.trending_movies||[]).slice(0,15).join(",")+"|"+(j.top_rated||[]).slice(0,15).join(",")+"|"+(j.recent||[]).slice(0,15).join(",")+"|"+(j.shows||[]).reduce((a,x)=>a+(x.upd||0)%1000+(x.n||0),0)+"|"+(j.shows||[]).reduce((a,x)=>(a*31+(x.le?x.le[0]*1000+x.le[1]:0))%1000000007,7);
-const saveShows=j=>{try{const t=JSON.stringify(j);if(t.length<4500000)store.set("shows_v1",t)}catch(e){}};
+const SHOWS_FRESH=600000;   /* a saved list is shown at once only if it is younger than this (10 min); older = ask the server first */
+const saveShows=j=>{try{j._t=Date.now();const t=JSON.stringify(j);if(t.length<4500000)store.set("shows_v1",t)}catch(e){}};
 async function loadShows(){if(SHOWS)return;
   /* the server inlines the list into this very page: render on first paint, no second request */
-  if(window.__BOOT__&&window.__BOOT__.shows){const j=window.__BOOT__;window.__BOOT__=null;SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);sig=mkSig(j);
+  if(window.__BOOT__&&window.__BOOT__.shows){const j=window.__BOOT__;window.__BOOT__=null;SHOWS=real(j.shows);NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);sig=mkSig(j);
     (window.requestIdleCallback||setTimeout)(()=>saveShows(j));setTimeout(refreshShows,500);return}
   /* instant paint from the last saved list, fresh data arrives silently right after */
   let c=null;try{c=JSON.parse(store.get("shows_v1")||"null")}catch(e){}
-  if(c&&c.shows&&c.shows.length){SHOWS=c.shows;NOW=Date.now()/1e3;POP=c.popular||[];TREND=c.trending||POP;TRENDD=c.trending_day||[];setLists(c);sig=mkSig(c);setTimeout(refreshShows,300);return}
-  $app.replaceChildren(...skHome());const j=await api("/api/shows");SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);sig=mkSig(j);saveShows(j)}
+  if(c&&c.shows&&c.shows.length&&c._t&&Date.now()-c._t<SHOWS_FRESH){SHOWS=real(c.shows);NOW=Date.now()/1e3;POP=c.popular||[];TREND=c.trending||POP;TRENDD=c.trending_day||[];setLists(c);sig=mkSig(c);setTimeout(refreshShows,300);return}
+  $app.replaceChildren(...skHome());const j=await api("/api/shows");SHOWS=real(j.shows);NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);sig=mkSig(j);saveShows(j)}
 let lastSync=Date.now();
 let rsFail=0;
-async function refreshShows(){if(!SHOWS)return;try{const j=await api("/api/shows");rsFail=0;SHOWS=j.shows;NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);SMAP=null;lastSync=Date.now();saveShows(j);const s2=mkSig(j),changed=s2!==sig;sig=s2;
-  const onHome=!location.hash.replace(/^#\/?/,"");if(changed&&onHome&&!document.querySelector(".modal")&&!document.activeElement?.matches?.("input,textarea")){const y=scrollY;home();scrollTo(0,y)}}catch(e){if(++rsFail<=8)setTimeout(refreshShows,Math.min(60000,2500*2**rsFail))}}
+function srvBanner(on){let b=document.getElementById("srvdown");if(!on){if(b)b.remove();return}if(b)return;b=document.createElement("div");b.id="srvdown";b.setAttribute("role","alert");b.style.cssText="position:fixed;left:0;right:0;top:0;z-index:99999;padding:8px 12px;text-align:center;font-size:13px;background:#b3261e;color:#fff";b.textContent="Server is not answering right now (down or asleep). Videos will not play until it is back.";document.body.append(b)}
+async function refreshShows(){if(!SHOWS)return;try{const j=await api("/api/shows");rsFail=0;srvBanner(false);SHOWS=real(j.shows);NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);SMAP=null;lastSync=Date.now();saveShows(j);const s2=mkSig(j),changed=s2!==sig;sig=s2;
+  const onHome=!location.hash.replace(/^#\/?/,"");if(changed&&onHome&&!document.querySelector(".modal")&&!document.activeElement?.matches?.("input,textarea")){const y=scrollY;home();scrollTo(0,y)}}catch(e){rsFail++;if(rsFail>=2&&!e.status)srvBanner(true);if(rsFail<=8)setTimeout(refreshShows,Math.min(60000,2500*2**rsFail))}}
 setInterval(()=>{if(!document.hidden)refreshShows()},3600000);
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&Date.now()-lastSync>300000)refreshShows()});
 addEventListener("online",()=>{rsFail=0;refreshShows()});
@@ -843,14 +995,19 @@ function baseName(n){n=String(n||"").replace(/\([^)]*\)/g," ").replace(LANGW,"")
 let FR=null;
 function frKey(s){return(s.movie?"m:":"s:")+baseName(s.name).toLowerCase().replace(/[^a-z0-9]+/g,"")}
 function seasonNo(s){const m=/season\s*0*(\d+)/i.exec(s.name);return m?+m[1]:0}
-function seasonLabel(s,i){const m=/season\s*0*(\d+)/i.exec(s.name),a=/\(([^)]{3,40})\)/.exec(s.name),arc=a&&!/hindi|tamil|telugu|dub|sub|multi|audio/i.test(a[1])?" \u00b7 "+a[1]:"";return(m?"Season "+(+m[1]):s.movie?"Movie":"Part "+(i+1))+arc}
+const SEASONTAG=/season|\bpart\b|cour|hindi|tamil|telugu|dub|sub|multi|audio|crunchy|jio|hotstar|netflix|prime|amazon|disney|\bhd\b|uncut|episodes?|download/i;
+const parenOf=s=>{const a=/\(([^)]{3,40})\)/.exec(s.name||"");return a?a[1]:""};
+const variantTag=s=>{const p=parenOf(s);if(/crunchy|jio|hotstar|netflix|prime|amazon|disney/i.test(p))return p;if(/\bsubbed\b|\bsub\b/i.test(s.name))return"Sub";if(/\bdubbed\b|\bdub\b/i.test(s.name))return"Dub";return""};
+function lbl0(s,i){const m=/season\s*0*(\d+)/i.exec(s.name),p=parenOf(s),arc=p&&!SEASONTAG.test(p)?" \u00b7 "+p:"";return(m?"Season "+(+m[1]):s.movie?"Movie":"Part "+(i+1))+arc}
+/* mem = all seasons of the anime: two hubs with the same season (Hindi dub / sub, JioHotstar / Crunchyroll) get a tag so the list never shows "Season 2" twice */
+function seasonLabel(s,i,mem){let L=lbl0(s,i);if(!mem||mem.length<2)return L;const same=mem.filter((x,k)=>lbl0(x,k)===L);if(same.length<2)return L;const v=variantTag(s);if(v)L+=" \u00b7 "+v;const same2=same.filter(x=>lbl0(x,0)+(variantTag(x)?" \u00b7 "+variantTag(x):"")===L);return same2.length>1?L+" ("+(same2.indexOf(s)+1)+")":L}
 function frMap(){if(FR)return FR;FR={};SHOWS.forEach(s=>{(FR[frKey(s)]=FR[frKey(s)]||[]).push(s)});
   Object.keys(FR).forEach(k=>FR[k].sort((a,b)=>seasonNo(a)-seasonNo(b)||a.ord-b.ord));return FR}
 /* keep the first card of each anime, drop its other seasons */
 function dedupe(list){const seen=new Set();return list.filter(s=>{const k=frKey(s);if(seen.has(k))return false;seen.add(k);return true})}
 function seasonPicker(base,mem){
   const m=modal(h("b",{style:"font-size:18px"},base),h("div",{class:"muted",style:"font-size:13px"},mem.length+" seasons \u00b7 pick one"),
-    ...mem.map((x,i)=>h("button",{class:"sr",onclick:()=>{m.remove();go("#/show/"+x.slug)}},h("div",{class:"th"},posterEl(x)),h("div",{style:"min-width:0"},h("b",{},seasonLabel(x,i)),h("small",{},(x.n?x.n+" ep \u00b7 ":"")+subOf(x)))))
+    ...mem.map((x,i)=>h("button",{class:"sr",onclick:()=>{m.remove();go("#/show/"+x.slug)}},h("div",{class:"th"},posterEl(x)),h("div",{style:"min-width:0"},h("b",{},seasonLabel(x,i,mem)),h("small",{},(x.n?x.n+" ep \u00b7 ":"")+subOf(x)))))
     ,h("button",{class:"back",onclick:()=>m.remove()},"Close"))}
 const subOf=s=>((s.langs||[]).length?s.langs.slice(0,2).join(" · ")+" Dub":"Anime")+(s.movie?" · Movie":"");
 const ago=t=>{const d=Math.max(0,NOW-t);return d<3600?Math.max(1,Math.round(d/60))+"m ago":d<86400?Math.round(d/3600)+"h ago":Math.round(d/86400)+"d ago"};
@@ -1001,7 +1158,7 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
       gl.length?h("div",{class:"hg"},gl.map(g=>h("span",{},g))):null,
       ds?(()=>{const p=h("p",{class:"hd"},ds),b=h("button",{class:"hmore",onclick:()=>{const o=p.classList.toggle("open");b.textContent=o?"Show less":"Show more"}},"Show more");return h("div",{},p,ds.length>150?b:null)})():null,
       h("div",{class:"row2"},play,fav,shr))))];
-  if(mem.length>1)kids.push(h("div",{class:"lbl",style:"margin-top:18px"},"Seasons"),h("div",{class:"chips"},mem.map((x,k)=>h("button",{class:"chip","aria-pressed":String(x.slug===slug),onclick:()=>{if(x.slug!==slug)go("#/show/"+x.slug)}},seasonLabel(x,k)))));
+  if(mem.length>1)kids.push(h("div",{class:"lbl",style:"margin-top:18px"},"Seasons"),h("div",{class:"chips"},mem.map((x,k)=>h("button",{class:"chip","aria-pressed":String(x.slug===slug),onclick:()=>{if(x.slug!==slug)go("#/show/"+x.slug)}},seasonLabel(x,k,mem)))));
   if(!s.movie){const pp=epProgAll(slug),se={};vids.forEach(v=>(se[v.season]=se[v.season]||[]).push(v));
     for(const n of Object.keys(se).sort((a,b)=>a-b))kids.push(h("h2",{class:"sec"},"Season "+n),h("div",{class:"eps epl"},se[n].map(v=>h("button",{"data-k":v.season+":"+v.episode,class:"ep epc"+(last&&last.season==v.season&&last.episode==v.episode?" cur":""),title:v.title||"",onclick:()=>go("#/watch/"+slug+"/"+v.season+"/"+v.episode)},h("span",{class:"en"},String(v.episode)),h("span",{class:"ec"},h("span",{class:"et"},epTitle(v)||"Episode "+v.episode),h("span",{class:"es"},"Season "+v.season+" \u00b7 Episode "+v.episode+(pp[v.season+":"+v.episode]>=95?" \u00b7 \u2713 Watched":pp[v.season+":"+v.episode]>0?" \u00b7 "+pp[v.season+":"+v.episode]+"% watched":""))),h("span",{class:"eg"},"\u25B6"),pp[v.season+":"+v.episode]>0?h("i",{class:"epbar",style:"width:"+Math.min(100,pp[v.season+":"+v.episode])+"%"}):null))));
     if(!vids.length)kids.push(h("p",{class:"muted"},"No episodes found."))}
@@ -1017,8 +1174,21 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
     setTimeout(tick,2500)};setTimeout(tick,1500)}}
 
 /* ---------- download ---------- */
+/* download link = a separate link, and only for a signed-in account (the server says so if not) */
+async function dlTicket(tok){try{const j=await api("/api/dltok/"+tok);if(!j.tok)throw new Error("Download is not available for this stream.");return j}
+  catch(e){throw new Error(e.status===401?"Download ke liye pehle sign in karo.":(e.message||"Download is not available for this stream."))}}
+async function downloadWn(url,name){
+  const mt=/\/wn\/([^\/.?]+)/.exec(url);if(!mt){const a=h("a",{href:url,download:name});document.body.append(a);a.click();a.remove();return}
+  const j=await dlTicket(mt[1]),dl="/wn/"+j.tok+"/dl?name="+encodeURIComponent(name);
+  const r=await fetch(dl,{headers:{Range:"bytes=0-0"},cache:"no-store"});   /* probe: shows a clear message instead of an error page */
+  if(!r.ok){let e={};try{e=await r.json()}catch(x){}throw new Error(e.error||"Download is not available right now.")}
+  const a=h("a",{href:dl});document.body.append(a);a.click();setTimeout(()=>a.remove(),1000)}
 async function downloadLevel(uri,name,bar,label){
-  const dl=uri.replace("/u/","/dl/")+"?name="+encodeURIComponent(name);
+  /* the stream link and the download link are different links: ask the server for a download link first */
+  let dl;const mt=/\/mq\/([^\/]+)\/u\/([^\/.?]+)/.exec(uri);
+  if(mt){const j0=await dlTicket(mt[1]);
+    dl=uri.replace("/mq/"+mt[1]+"/u/","/mq/"+j0.tok+"/dl/")+"?name="+encodeURIComponent(name)}
+  else dl=uri.replace("/u/","/dl/")+"?name="+encodeURIComponent(name);
   const r=await fetch(dl+"&check=1");let j={};try{j=await r.json()}catch(e){}
   if(!r.ok||!j.ok)throw new Error(j.error||"Download is not available for this stream.");
   const a=h("a",{href:dl});document.body.append(a);a.click();setTimeout(()=>a.remove(),1000)}
@@ -1057,7 +1227,7 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
       const nx=list.find(x=>x>e);if(nx)nextEp=[sn,nx];else{const ns=[...new Set(vids.map(v=>+v.season))].sort((a,b)=>a-b).find(x=>x>sn);if(ns)nextEp=[ns,Math.min(...vids.filter(v=>+v.season===ns).map(v=>+v.episode))]}
       if(nextEp){nextBtn.style.display="";const nt=epTitle(vids.find(v=>+v.season===nextEp[0]&&+v.episode===nextEp[1]));nextBtn.textContent="Next episode · S"+nextEp[0]+" E"+nextEp[1]+(nt?" · "+nt:"")+" ›";nextBtn.onclick=()=>go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1])}})}
   let skipC=[];api("/api/skip/"+slug+(s.movie?"":"/"+season+"/"+episode)).then(r=>{if(alive()&&r&&Array.isArray(r.segments))skipC=r.segments}).catch(()=>{});   /* never awaited: a missing answer just means no skip button */
-  let data;try{data=await api("/api/watch/"+slug+(s.movie?"":"/"+season+"/"+episode))}catch(e){if(alive())msg.textContent="Server error. Please try again shortly.";return}
+  let data;try{data=await watchApi(s,season,episode)}catch(e){if(alive()){msg.textContent=e.captcha?(onTV()?"Scan the QR code with your phone to play this video. Open the video again to get a new QR.":"Quick check needed before this video can play. Reload the page to try again."):e.signin?"You have watched your free videos. Sign in to keep watching.":e.busy?"Too many videos are playing on this network right now. Close one and try again.":!e.status?"The server is not answering (down or asleep). Try again in a minute.":"Server error. Please try again shortly.";if(e.signin)authModal()}return}
   if(!alive())return;
   const src=data.sources||[];if(!src.length){msg.textContent="No playable stream is available for this title yet.";return}
   const pref=store.get("lang");let cur=src.findIndex(x=>x.lang===pref&&x.kind==="mq");if(cur<0)cur=src.findIndex(x=>x.kind==="mq");if(cur<0)cur=0;
@@ -1078,7 +1248,9 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
   const pic=h("select",{title:"Picture mode","aria-label":"Picture mode",onchange:e=>setPic(e.target.value)},Object.keys(PICS).map(k=>h("option",{value:k,selected:k===picNow},"Picture: "+PICS[k][0])));
   video.style.filter=PICS[picNow][1];
   dlBtn.onclick=async()=>{const x=src[cur];
-    if(x.kind!=="mq"){const a=h("a",{href:x.url,download:title});document.body.append(a);a.click();a.remove();dlLabel.textContent="Download started in your browser.";return}
+    if(x.kind!=="mq"){dlBtn.disabled=true;dlLabel.textContent="Preparing…";
+      try{await downloadWn(x.url,(title+" "+(x.quality||"")).replace(/[^\w\- ]+/g,"").trim().replace(/ +/g,"_"));dlLabel.textContent="Download started in your browser."}
+      catch(e){dlLabel.textContent=e.message}dlBtn.disabled=false;return}
     if(!hls||!hls.levels.length){dlLabel.textContent="Wait for the video to load first.";return}
     const k=qSel>=0?qSel:hls.levels.reduce((b,l,i,arr)=>l.height>arr[b].height?i:b,0),L=hls.levels[k],uri=L.uri||(L.url&&L.url[0]);
     dlBtn.disabled=true;dlBar.style.width="0";dlLabel.textContent="Preparing…";
@@ -1105,13 +1277,13 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
     if(x.kind==="mq"&&window.Hls&&Hls.isSupported()){const pol=(n,d,ttfb,load)=>({default:{maxTimeToFirstByteMs:ttfb,maxLoadTimeMs:load,timeoutRetry:{maxNumRetry:n,retryDelayMs:0,maxRetryDelayMs:0},errorRetry:{maxNumRetry:n+2,retryDelayMs:d,maxRetryDelayMs:6000}}});
       hls=new Hls({maxBufferLength:30,maxMaxBufferLength:60,maxBufferSize:40*1e6,backBufferLength:15,maxBufferHole:0.6,nudgeMaxRetry:8,capLevelToPlayerSize:true,startFragPrefetch:true,abrBandWidthFactor:0.8,abrBandWidthUpFactor:0.6,manifestLoadPolicy:pol(3,1000,10000,20000),levelLoadPolicy:pol(3,1000,10000,20000),fragLoadPolicy:pol(4,800,12000,30000)});
       let netTry=0,medTry=0;hls.loadSource(x.url);hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED,()=>{video.play().catch(()=>{hideMsg()});
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>{if(keepPaused)keepPaused=0;else video.play().catch(()=>{hideMsg()});
         if(hls.levels.length>1)sels.prepend(h("select",{onchange:e=>{qSel=+e.target.value;hls.currentLevel=qSel}},h("option",{value:-1},"Quality: Auto"),hls.levels.map((l,k)=>({l,k})).sort((a,b)=>b.l.height-a.l.height).map(({l,k})=>h("option",{value:k},"Quality: "+l.height+"p"))))});
       hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED,()=>{if(hls.subtitleTracks.length)sels.append(h("select",{onchange:e=>{hls.subtitleTrack=+e.target.value}},h("option",{value:-1},"Subtitles: Off"),hls.subtitleTracks.map((t,k)=>h("option",{value:k},"Subtitles: "+(t.name||t.lang||k+1)))))});
       hls.on(Hls.Events.AUDIO_TRACKS_UPDATED,()=>{if(hls.audioTracks.length>1)sels.append(h("select",{onchange:e=>{hls.audioTrack=+e.target.value}},hls.audioTracks.map((t,k)=>h("option",{value:k},"Audio: "+(t.name||t.lang||k+1)))))});
       hls.on(Hls.Events.FRAG_BUFFERED,()=>{netTry=0});
       hls.on(Hls.Events.ERROR,(_e,d)=>{if(!d.fatal)return;
-        if(d.type===Hls.ErrorTypes.NETWORK_ERROR&&netTry++<4){buf.style.display="block";setTimeout(()=>{if(hls)hls.startLoad(video.currentTime||-1)},1500*netTry)}
+        if(d.type===Hls.ErrorTypes.NETWORK_ERROR&&netTry++<4){beatNow();buf.style.display="block";setTimeout(()=>{if(hls)hls.startLoad(video.currentTime||-1)},1500*netTry)}
         else if(d.type===Hls.ErrorTypes.MEDIA_ERROR&&medTry++<3){if(medTry===2)hls.swapAudioCodec();hls.recoverMediaError()}
         else if(!fallback())bad("This stream failed to load. Please try again in a moment.")})}
     else{video.src=x.url;video.play().catch(()=>{hideMsg()})}}
@@ -1128,6 +1300,21 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
     [["sk_i","Skip intro & recap"],["sk_o","Skip ending"]].forEach(([k,lb])=>r.push({label:lb,val:skModeName(skMode(k)),opts:SK_MODES.map(([v,t])=>({t,on:skMode(k)===v,f:()=>{store.set(k,v)}}))}));
     return r};
   playerUI(box,video,{show:nm(s),sub:()=>ttl.textContent,hasPrev:()=>!!prevBtn,prev:()=>prevBtn&&prevBtn.click(),hasNext:()=>!!nextEp,next:()=>nextEp&&go("#/watch/"+slug+"/"+nextEp[0]+"/"+nextEp[1]),vids:()=>allVids,sn:+season,en:+episode,slug,rows,skipCands:()=>skipC,autoNext:()=>auto.checked});
+  /* session heartbeat: the server ties the link to this IP + a 60-min session. A ping every 30 s keeps it alive.
+     If the link is nearly over (or the network changed) we quietly fetch a fresh link and carry on from the same second. */
+  let hbT=0,renewing=0,keepPaused=0,beatNow=()=>{};
+  const tokOf=u=>{const m=/\/mq\/([^\/.?]+)\.m3u8/.exec(u||"")||/^\/wn\/([^\/.?]+)$/.exec(u||"");return m?m[1]:""};
+  async function renew(){if(renewing||!alive())return;renewing=1;
+    try{const d=await watchApi(s,season,episode);if(!alive())return;
+      const ns=d.sources||[];if(!ns.length||!tokOf((ns[Math.min(cur,ns.length-1)]||{}).url))return;
+      src.forEach((y,j)=>{const f=ns.find(z=>z.lang===y.lang&&z.kind===y.kind&&z.quality===y.quality)||ns[j];if(f)src[j]=f});
+      const t=video.currentTime||0;if(t>1)resume=t;keepPaused=video.paused?1:0;tried.clear();play(cur)}
+    catch(e){}finally{renewing=0}}
+  if(data.sess){
+    const beat=async()=>{if(!alive()){clearInterval(hbT);document.removeEventListener("visibilitychange",beat);return}
+      const t=tokOf((src[cur]||{}).url);if(!t)return;
+      try{const r=await fetch("/api/hb/"+t,{cache:"no-store"});const j=await r.json();if(j.renew||!j.ok)renew()}catch(e){}};
+    hbT=setInterval(beat,30000);document.addEventListener("visibilitychange",beat);beatNow=beat}
   play(cur)}
 
 /* ---------- skip intro / recap / ending: settings shared by the player and the account page ---------- */
@@ -1280,7 +1467,7 @@ function accountPage(){killPlayer();
 
 async function route(){try{await loadShows();if(window.__splashHide)window.__splashHide();const p=location.hash.replace(/^#\/?/,"").split("/").filter(Boolean).map(decodeURIComponent);scrollTo(0,0);drawNav();
   if(p[0]==="show"&&p[1])return showPage(p[1]);if(p[0]==="watch"&&p[1])return watchPage(p[1],p[2],p[3]);if(p[0]==="list")return listPage();if(p[0]==="account")return accountPage();home()}
-  catch(e){$app.replaceChildren(h("p",{class:"muted"},"Could not load. Please refresh the page."))}}
+  catch(e){if(window.__splashHide)window.__splashHide();const rt=h("button",{class:"pri",onclick:()=>route()},"Try again");$app.replaceChildren(h("div",{style:"padding:40px 20px;text-align:center"},h("h2",{style:"margin:0 0 8px"},"Server is not answering"),h("p",{class:"muted"},"It may be asleep or down. Trying again by itself every few seconds."),rt));if(!SHOWS)setTimeout(()=>{if(!SHOWS&&document.contains(rt))route()},6000)}}
 
 /* ---------- search overlay ---------- */
 const RKEY="recent_q";

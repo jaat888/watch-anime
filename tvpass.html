@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark light">
+<title>TV pass</title>
+<style>
+:root{--bg:#0b0a0c;--panel:#17151a;--line:#2e2a33;--fg:#f4f1f6;--dim:#a39dab;--accent:#e8506a;--ok:#2fbf71}
+@media (prefers-color-scheme:light){:root{--bg:#f6f3ee;--panel:#fff;--line:#ddd6cc;--fg:#1b1a1d;--dim:#6b665f}}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;padding:20px;padding-top:max(20px,env(safe-area-inset-top));padding-bottom:max(20px,env(safe-area-inset-bottom))}
+.box{width:100%;max-width:420px;background:var(--panel);border:1px solid var(--line);border-radius:22px;padding:24px 20px;text-align:center}
+h1{margin:0 0 6px;font-size:21px}
+p{margin:8px 0;color:var(--dim)}
+.code{font-size:30px;font-weight:800;letter-spacing:6px;margin:14px 0 6px;color:var(--fg)}
+button,input{font:inherit;min-height:52px;border-radius:14px;border:1px solid var(--line);width:100%;margin-top:12px}
+button{background:var(--accent);color:#fff;border:0;font-weight:700}
+input{background:transparent;color:var(--fg);text-align:center;text-transform:uppercase;letter-spacing:6px;font-size:24px;padding:0 10px}
+.ok{color:var(--ok);font-weight:700}
+.err{color:var(--accent);font-weight:600}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1 id="t">TV ke liye ek chhota game</h1>
+  <p id="m">Thoda ruko…</p>
+  <div class="code hide" id="c"></div>
+  <input id="in" class="hide" maxlength="7" placeholder="TV ka code" autocomplete="off" autocapitalize="characters" spellcheck="false">
+  <button id="go" class="hide"></button>
+</div>
+<script>
+"use strict";
+(function () {
+  var $ = function (i) { return document.getElementById(i); };
+  var t = $("t"), m = $("m"), c = $("c"), inp = $("in"), go = $("go");
+  var code = "";
+  try { code = (new URLSearchParams(location.search).get("c") || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6); } catch (e) {}
+  /* the code is only needed once: take it out of the address bar and history */
+  try { if (code) history.replaceState(null, "", "/tv"); } catch (e) {}
+
+  var DID = (function () {   /* same device id as the site, so the server sees one device */
+    var d = ""; try { d = localStorage.getItem("did") || ""; } catch (e) {}
+    if (!/^[A-Za-z0-9_-]{8,40}$/.test(d)) {
+      var a = "abcdefghijklmnopqrstuvwxyz0123456789"; d = "";
+      try { var u = new Uint8Array(20); crypto.getRandomValues(u); for (var i = 0; i < u.length; i++) d += a[u[i] % 36]; }
+      catch (e) { for (var j = 0; j < 20; j++) d += a[Math.random() * 36 | 0]; }
+      try { localStorage.setItem("did", d); } catch (e) {}
+    }
+    return d;
+  })();
+
+  function show(title, msg, cls) { t.textContent = title; m.textContent = msg; m.className = cls || ""; }
+  function button(label, fn) { go.textContent = label; go.classList.remove("hide"); go.onclick = fn; }
+  async function post(url, body, hdr) {
+    var h = Object.assign({ "Content-Type": "application/json", "X-Device": DID }, hdr || {});
+    var r = await fetch(url, { method: "POST", headers: h, body: JSON.stringify(body) });
+    var j = {}; try { j = await r.json(); } catch (e) {} j._status = r.status; return j;
+  }
+  function loadCap() {
+    return new Promise(function (ok, no) {
+      if (window.CapGame) return ok();
+      var s = document.createElement("script"); s.src = "/captcha.js?v=9";
+      s.onload = ok; s.onerror = function () { s.remove(); no(new Error("script")); }; document.head.append(s);
+    });
+  }
+
+  function askCode(note) {
+    code = ""; c.classList.add("hide"); go.classList.add("hide");
+    show("TV ka code daalo", note || "TV pe QR ke neeche 6 akshar ka code dikhta hai.");
+    inp.classList.remove("hide"); inp.value = "";
+    button("Aage", function () {
+      var v = inp.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+      if (v.length !== 6) { show("TV ka code daalo", "Code 6 akshar ka hota hai.", "err"); return; }
+      code = v; inp.classList.add("hide"); check();
+    });
+    inp.focus();
+  }
+
+  async function check() {
+    go.classList.add("hide"); show("TV ke liye ek chhota game", "Code check ho raha hai…");
+    var j; try { j = await post("/api/tv/check", { code: code }); } catch (e) { j = {}; }
+    if (j._status === 429) { show("Thoda ruko", "Bahut zyada koshish. Ek minute baad dobara.", "err"); button("Dobara", check); return; }
+    if (!j.ok) { askCode("Ye code expire ho gaya ya galat hai. TV pe naya QR kholo, ya code dobara daalo."); return; }
+    c.textContent = code; c.classList.remove("hide");
+    show("TV ke liye ek chhota game", "Game jeeto, TV apne aap chalu ho jayega.");
+    button("Game khelo", play);
+    play();
+  }
+
+  var busy = false;
+  async function play() {
+    if (busy) return; busy = true; go.classList.add("hide");
+    try {
+      await loadCap();
+      var r = await CapGame.modal({ headers: { "X-Device": DID } });
+      if (!r || !r.token) { show("Game band ho gaya", "TV ko pass dene ke liye game jeetna padega.", "err"); button("Phir se khelo", play); return; }
+      show("TV ko bhej raha hoon…", "");
+      var j = await post("/api/tv/done", { code: code }, { "X-Captcha": r.token });
+      if (j.ok) { c.classList.add("hide"); go.classList.add("hide"); show("Ho gaya ✓", "TV dekho, video ab chalu ho jayega. Is page ko band kar sakte ho.", "ok"); return; }
+      if (j.why === "gone" || j.why === "used") { askCode("Ye code ab kaam nahi karta (expire ya pehle hi use ho chuka). TV pe naya QR kholo."); return; }
+      show("Dikkat aayi", "Dobara koshish karo.", "err"); button("Phir se khelo", play);
+    } catch (e) {
+      show("Game load nahi hua", "Internet check karke dobara koshish karo.", "err"); button("Dobara", play);
+    } finally { busy = false; }
+  }
+
+  if (code.length === 6) check(); else askCode();
+})();
+</script>
+</body>
+</html>

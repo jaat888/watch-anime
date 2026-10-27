@@ -62,6 +62,8 @@ from urllib.parse import urlparse, parse_qs, unquote, urljoin
 import applog
 applog.install()          # keep every printed line + crashes in the SQL `logs` table
 import accounts
+import guard                 # protection plan: real IP, PROTECT mode, VIP keys
+import captcha               # protection plan Step 7: game captcha (server side) + pass token
 import genres as G
 import skiptimes
 import requests
@@ -94,7 +96,7 @@ _LW             = LIST_WAIT if OPTIMISTIC else LIST_BUDGET
 SHOWS_TTL       = _env_int("SHOWS_TTL", 45)        # /api/shows payload cache
 PL_TTL          = _env_int("PL_TTL", 300)          # HLS playlist cache (VOD)
 
-VERSION  = "3.5.0"
+VERSION  = "3.6.0"
 ADDON_ID = "community.raretoons2"
 ADDON_NAME = "mollad_jaat"
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -620,6 +622,50 @@ def _unseal(token):
 
 
 _mq_token, _mq_decode_token = _seal, _unseal
+captcha.configure(_TK)            # the captcha pass token is signed with the same secret
+threading.Thread(target=captcha.load_cfg, daemon=True).start()     # Step 8: game numbers saved from the lab come back after a restart
+
+# ---- Step 3: session-bound links --------------------------------------------
+# Old (Stremio / VIP / guard off) link : sealed(zipper)                    -> no session, works as before.
+# Website link (guard on or log)       : sealed("v2" kind sid ip-key expiry zipper), parts split by \x1f.
+#   kind "s" = stream (playlist + every segment), kind "d" = download.  The SAME token rides along in
+#   every rewritten playlist URL, so segments are bound to the same IP / session / expiry.
+_SEP = "\x1f"
+
+
+def _mq_new(zipper, sess, kind="s", life=None, uid=""):
+    """Session-bound token.  kind: s stream (HLS), w WN stream, d download.  life = seconds (capped by the
+    session's own expiry).  uid = the signed-in account (download links only)."""
+    exp = sess["exp"] if not life else min(sess["exp"], time.time() + life)
+    return _seal(_SEP.join(("v3", kind, sess["sid"], sess["ipk"], "%d" % exp, str(uid or ""), zipper)))
+
+
+def _mq_parse(tok):
+    """token -> {"z","kind","sid","ipk","exp","uid"} or None.  Old tokens come back with sid "" (no session)."""
+    plain = _unseal(tok)
+    if not plain:
+        return None
+    try:
+        if plain.startswith("v3" + _SEP):
+            _, kind, sid, ipk, exp, uid, z = plain.split(_SEP, 6)
+            return {"z": z, "kind": kind, "sid": sid, "ipk": ipk, "exp": float(exp), "uid": uid}
+        if plain.startswith("v2" + _SEP):            # made by Step 3 (a player tab that is still open)
+            _, kind, sid, ipk, exp, z = plain.split(_SEP, 5)
+            return {"z": z, "kind": kind, "sid": sid, "ipk": ipk, "exp": float(exp), "uid": ""}
+    except Exception:
+        return None
+    return {"z": plain, "kind": "", "sid": "", "ipk": "", "exp": 0.0, "uid": ""}
+
+
+def _wn_proxied():
+    """Do WN (movie) streams go through our own /wn proxy?  auto = only once PROTECT=on.
+    WN_PROXY=1 forces it (to test in dry-run), WN_PROXY=0 keeps the direct origin link."""
+    v = (os.environ.get("WN_PROXY") or "auto").strip().lower()
+    if v in ("0", "off", "no"):
+        return False
+    if v in ("1", "on", "yes"):
+        return True
+    return guard.mode() == "on"
 
 
 # ------------------------------------------------- WatchNow direct source --
@@ -1524,7 +1570,7 @@ def _clip(text, limit):
 
 
 def _phx_card(rec, lang, prefix, ep_title, note, zipper, base, src="MQ",
-              kind="fsl", qres=""):
+              kind="fsl", qres="", wz=""):
     """Phoenix-style stream card (MQ = in-app HLS, WN = direct MKV)."""
     sub = " · sub" if lang.lower().endswith("sub") else ""
     lang0 = re.sub(r"\s*sub\s*$", "", lang, flags=re.I).strip() or lang
@@ -1562,6 +1608,7 @@ def _phx_card(rec, lang, prefix, ep_title, note, zipper, base, src="MQ",
             "notWebReady": False,
             "bingeGroup": binge,
             "filename": fname,
+            **({"rt2z": wz} if wz else {}),      # WN: the site's own button link (fresh-resolved by /wn)
         },
     }
 
@@ -1615,6 +1662,8 @@ EPT_TTL_OK = 14 * 86400      # every wanted episode has a title
 EPT_TTL_NEW = 6 * 3600       # some wanted episode still has none (airing show)
 EPT_TTL_NF = 24 * 3600       # nothing found anywhere -> look again daily
 EPT_RETRY = 600              # network error -> try again after ~10 min
+EPT_VER = 2                  # bump = every saved title list is thrown away and fetched again (v1 could hold
+                             # the SEASON 1 titles under a Season 2 show)
 _EPT_FAIL = {}               # slug -> time of last network failure (memory only)
 _ept_lock = threading.Lock()
 _ANILIST_Q = ("query($q:String){Page(perPage:8){media(search:$q,type:ANIME,"
@@ -1673,10 +1722,16 @@ def _ept_anilist(name, season, eps):
             base = _ept_norm(re.sub(r"\b(?:season|part)\s*\d+\b|\b\d+(?:st|nd|rd|th) season\b", " ", nm, flags=re.I))
             score = max(score, difflib.SequenceMatcher(None, want, base).ratio())
         hint = max((_ept_season_hint(nm) for nm in names if nm), default=0)
+        full = max((difflib.SequenceMatcher(None, want, _ept_norm(nm)).ratio() for nm in names if nm), default=0)
         if season > 1:
-            score += 0.15 if hint == season else (-0.25 if hint and hint != season else 0)
+            if hint == season:
+                score += 0.15
+            elif hint:               # an entry that names ANOTHER season is never the answer
+                score -= 0.5
+            elif full >= 0.97:       # plain "<Show>" with no season word = the FIRST season, never season 2+
+                score -= 0.5
         elif hint > 1:
-            score -= 0.25
+            score -= 0.5
         if (m.get("format") or "") in ("MOVIE", "MUSIC", "SPECIAL"):
             score -= 0.3
         if score > best_score:
@@ -1763,13 +1818,19 @@ def _ept_job(rec):
         _EPT_FAIL[slug] = time.time()             # nothing cached: retried in ~10 min
         return
     _EPT_FAIL.pop(slug, None)
-    entry = {"gf": 1, "t": time.time(), "m": out}
+    entry = {"gf": 1, "t": time.time(), "m": out, "v": EPT_VER}
     with _tmdb_lock:
         _TMDB_CACHE["ept:" + slug] = entry
     try:
         accounts.tmdb_set("ept:" + slug, entry)
     except Exception as e:
         applog.log_once("ept-save", 300, "error", "app", f"episode titles save failed ({slug}): {e!r}")
+
+
+def _ept_ent(slug):
+    """Saved title list of this show - only if it was made by the current rules (older ones may be wrong)."""
+    ent = _TMDB_CACHE.get("ept:" + slug)
+    return ent if isinstance(ent, dict) and ent.get("v") == EPT_VER else None
 
 
 def _ep_titles(rec, wait=0.0):
@@ -1779,7 +1840,7 @@ def _ep_titles(rec, wait=0.0):
     try:
         with STORE_LOCK:
             wanted = {f"{s or 1}:{e}" for (s, e) in rec["eps"] if e}
-        ent = _TMDB_CACHE.get("ept:" + slug)
+        ent = _ept_ent(slug)
         age = time.time() - float(ent.get("t", 0)) if isinstance(ent, dict) else None
         m = (ent or {}).get("m") or {} if isinstance(ent, dict) else {}
         if age is not None:
@@ -1793,7 +1854,7 @@ def _ep_titles(rec, wait=0.0):
         t0 = time.time()
         while time.time() - t0 < wait:
             time.sleep(0.1)
-            ent = _TMDB_CACHE.get("ept:" + slug)
+            ent = _ept_ent(slug)
             if isinstance(ent, dict):
                 return ent.get("m") or {}, False
             if time.time() - _EPT_FAIL.get(slug, 0) < EPT_RETRY:
@@ -2146,7 +2207,7 @@ def handle_stream(mtype, mid):
             u, kind, z, qn = hit
             wq = _res_label(unquote(u.split("?")[0])) or _res_label(qn)
             streams.append(_phx_card(rec, lang, prefix, ep_title, "", u,
-                                     base, src="WN", kind=kind, qres=wq))
+                                     base, src="WN", kind=kind, qres=wq, wz=z))
     return {"streams": streams}
 
 # ------------------------------------------------------ website API --------
@@ -2246,6 +2307,8 @@ def _api_shows_build():
     for it in items:
         if it["slug"] in _EN:
             it["en"] = _EN[it["slug"]]
+    if guard.mode() != "off":                       # Step 6: fake anime for the honeypot (the website hides z:1)
+        items.extend(guard.decoy_items(list(items)))
     items.sort(key=lambda x: x["name"].lower())
     return {"shows": items, "now": int(time.time()), "popular": _popular(),
             "trending": _trending("week"),
@@ -3061,8 +3124,9 @@ def _updates_refresh():
         _upd_cache["busy"] = False
 
 
-def api_watch(slug, season, episode):
-    """Playable sources for one episode/movie, simplified for the website."""
+def api_watch(slug, season, episode, sess=None):
+    """Playable sources for one episode/movie, simplified for the website.
+    sess (guard.sess_open) -> every MQ link is bound to that session (Step 3)."""
     rec = SHOWS.get(slug)
     if not rec:
         return {"sources": [], "error": "unknown show"}
@@ -3079,11 +3143,24 @@ def api_watch(slug, season, episode):
         url = c.get("url") or ""
         if is_mq:
             url = urlparse(url).path        # same-origin: no http/https mix
+            if sess:
+                mt = re.match(rf"^/mq/({_B64_RE}+)\.m3u8$", url)
+                z = _unseal(mt.group(1)) if mt else ""
+                if z.startswith("https://codedew.com/"):
+                    url = f"/mq/{_mq_new(z, sess, 's')}.m3u8"
+        elif sess and _wn_proxied():
+            wz = (c.get("behaviorHints") or {}).get("rt2z") or ""
+            tgt = wz if wz.startswith("https://codedew.com/") else url
+            if tgt.startswith("https://"):
+                url = f"/wn/{_mq_new(tgt, sess, 'w')}"      # same-origin, bound to this IP + session
         out.append({"lang": (ml.group(1).strip() if ml else "Default"),
                     "kind": "mq" if is_mq else "direct",
                     "quality": mq.group(1) if mq else "",
                     "url": url})
-    return {"name": rec["name"], "sources": out}
+    res_ = {"name": rec["name"], "sources": out}
+    if sess:
+        res_["sess"] = True                 # tells the player to send heartbeats
+    return res_
 
 
 def api_skip(slug, season, episode):
@@ -3230,7 +3307,8 @@ def _finish_master(handler, zipper, master, text):
     if hs:
         with _hls_lock:
             _mqres_cache[master] = (time.time() + 6 * 3600, f"{max(hs)}p")
-    body = _rewrite_m3u8(text or "", master, f"/mq/{_mq_token(zipper)}").encode()
+    body = _rewrite_m3u8(text or "", master,
+                         f"/mq/{getattr(handler, '_mqtok', '') or _mq_token(zipper)}").encode()
     _warm_variants(master, text or "")
     handler._send_raw(body, CONTENT_TYPES[".m3u8"])
 
@@ -3282,7 +3360,7 @@ def _serve_m3u8_child(handler, zipper, b64url, ext, rt=""):
     if not target.startswith("http"):
         handler._send({"error": "bad child"}, 400)
         return
-    proxy_prefix = f"/mq/{_mq_token(zipper)}"
+    proxy_prefix = f"/mq/{getattr(handler, '_mqtok', '') or _mq_token(zipper)}"
     rng = handler.headers.get("Range")
     forced = None
     if rt:
@@ -3562,7 +3640,7 @@ def _wn_size(target):
     return total
 
 
-def _serve_wn_slice(handler, b64url):
+def _serve_wn_slice(handler, b64url, attach=None):
     """WatchNow slice-proxy.  googleusercontent answers ranged GETs
     INCONSISTENTLY (open-ended 206 sometimes, 200 + whole file other
     times) - so upstream status/CL are never trusted for the outgoing
@@ -3589,9 +3667,16 @@ def _serve_wn_slice(handler, b64url):
         handler.end_headers()
         return
     need = end - start + 1
-    handler.send_response(206)
+    full = bool(attach) and not mr          # a download without Range: plain 200 + attachment
+    handler.send_response(200 if full else 206)
     handler.send_header("Content-Type", "video/x-matroska")
-    handler.send_header("Content-Range", f"bytes {start}-{end}/{total}")
+    if attach:
+        fn = re.sub(r"[^\w\-. ]+", "", attach).strip().replace(" ", "_")[:80] or "video"
+        if not fn.lower().endswith(".mkv"):
+            fn += ".mkv"
+        handler.send_header("Content-Disposition", f'attachment; filename="{fn}"')
+    if not full:
+        handler.send_header("Content-Range", f"bytes {start}-{end}/{total}")
     handler.send_header("Content-Length", str(need))
     handler.send_header("Accept-Ranges", "bytes")
     handler.send_header("Access-Control-Allow-Origin", "*")
@@ -3622,8 +3707,45 @@ def _serve_wn_slice(handler, b64url):
             pass
 
 
+# ----------------------------------------------- Step 3: heartbeat, dl token --
+def api_hb(tok, ip, vip):
+    """Heartbeat of the website player (every 30 s).  The player is told to fetch a fresh link
+    (renew) when its link is nearly over, or - once PROTECT=on - when it is no longer valid."""
+    try:
+        p = _mq_parse(tok)
+        if not p:
+            return {"ok": False, "renew": True, "why": "bad"}
+        if not p["sid"] or vip:
+            return {"ok": True, "renew": False}
+        why = guard.sess_check(p, ip, "s", beat=True)
+        left = int(p["exp"] - time.time())
+        if why and guard.violation("session:" + why, ip, "heartbeat"):
+            return {"ok": False, "renew": True, "why": why}
+        return {"ok": True, "left": left, "renew": left < guard.SESS_RENEW_LEFT}
+    except Exception:
+        return {"ok": True, "renew": False}
+
+
+def api_dltok(tok, ip, vip, uid=None):
+    """Stream link (HLS or WN) -> separate short-lived download link.  Download needs a signed-in
+    account (uid); without it: violation (blocked only once PROTECT=on)."""
+    p = _mq_parse(tok)
+    if not p or not p["z"].startswith("https://"):
+        return {"error": "bad token"}, 400
+    if not p["sid"] or vip:
+        return {"tok": tok}, 200            # unbound link (Stremio / VIP / guard off)
+    why = guard.sess_check(p, ip, p["kind"])
+    if why and guard.violation("session:" + why, ip, "download token"):
+        return {"error": "Session ended. Please reload the video.", "renew": True, "why": why}, 403
+    if not uid and guard.violation("dl_login", ip, "download without sign-in"):
+        return {"error": "Download ke liye pehle sign in karo.", "login": True}, 401
+    sess = {"sid": p["sid"], "ipk": p["ipk"], "exp": p["exp"]}
+    return {"tok": _mq_new(p["z"], sess, "d", guard.DL_LIFE, uid=uid)}, 200
+
+
 # ---------------------------------------------------------- http server ----
 _admin_fails = {}
+_shadow_sem = threading.BoundedSemaphore(25)       # at most 25 banned visitors are slowed down at once (Step 6)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3666,7 +3788,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "range, origin, "
-                          "content-type, accept, authorization")
+                          "content-type, accept, authorization, x-vip-key, x-device, x-captcha")
         self.send_header("Access-Control-Max-Age", "86400")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -3678,6 +3800,229 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._is_head = False
         self._route()
+
+    def _gctx(self, qs=None):
+        """Per request: real IP + VIP check (guard.py). Never breaks the request."""
+        self._mqtok = ""            # one Handler serves many keep-alive requests: never reuse an old token
+        self._mquid = ""
+        self._dev, self._banned, self._pass, self._tvn = "", "", False, ""
+        try:
+            self._ip = guard.client_ip(self.headers, self.client_address[0])
+            self._vip = guard.is_vip(self.headers, qs, self._ip)    # key name or None
+            self._pass = (not self._vip) and captcha.check_pass(self.headers.get("X-Captcha"), self._ip)   # Step 7: passed a captcha lately
+            if not self._vip and not self._pass:      # Step 9: or a TV pass (a phone played the game for this TV)
+                self._tvn = captcha.check_tv_pass(self.headers.get("X-Captcha"), self._ip)
+                self._pass = bool(self._tvn)
+            self._dev = guard.device_id(self.headers)               # the browser's random id (X-Device), or ""
+            self._banned = "" if self._vip else guard.is_banned(self._ip, self._dev)   # Step 6: why, or ""
+            guard.note(self._ip)
+        except Exception:
+            self._ip, self._vip = self.client_address[0], None
+
+    # ---- Step 5 / 6 helpers -------------------------------------------------
+    def _limit(self, name, win, ip_max, dev_max=0, detail=""):
+        """Request-rate rule (Step 5).  True = answered with 429 (only when PROTECT=on) - stop."""
+        if self._vip:
+            return False
+        if guard.rate(name, self._ip, self._dev, win, ip_max, dev_max, detail or name):
+            self._send({"error": "Thoda ruko - bahut zyada requests.", "retry": win}, 429)
+            return True
+        return False
+
+    def _trap(self, slug, how):
+        """Step 6 honeypot: a fake anime was asked for.  True = visitor is banned now (PROTECT=on)."""
+        if self._vip or not guard.is_decoy(slug):
+            return False
+        if guard.trap(self._ip, self._dev, slug, how):
+            self._banned = "jaal: nakli anime"
+            return True
+        return False
+
+    def _quiet(self, kind):
+        """Step 6: a banned visitor gets an empty, error-free answer (a little slow for data routes).
+        True = answered, stop.  Dry-run (PROTECT=log) only logs and returns False."""
+        if not self._banned or self._vip:
+            return False
+        if not guard.violation("banned", self._ip, self._banned, dev=self._dev):
+            return False
+        if kind != "mq" and _shadow_sem.acquire(blocking=False):
+            try:
+                time.sleep(2.5)
+            finally:
+                _shadow_sem.release()
+        if kind == "watch":
+            self._send({"name": "", "sources": []})
+        elif kind == "stream":
+            self._send({"streams": []})
+        elif kind == "meta":
+            self._send({"meta": {}}, 404)
+        elif kind == "mq":
+            self._send({"error": "session idle", "renew": True, "why": "idle"}, 403)
+        else:
+            self._send({"error": "not found"}, 404)
+        return True
+
+    def _pre(self, kind, slug=None):
+        """Front door of the data routes: fake-anime trap, behaviour count, ban check.
+        True = the request was answered quietly - stop."""
+        if self._vip:
+            return False
+        if slug:
+            self._trap(slug, kind)
+        guard.track(kind, self._ip, self._dev)
+        return self._quiet(kind)
+
+    def _watch(self, slug, season, episode):
+        """/api/watch - the video links for the website (Step 3 session + Step 5 rules)."""
+        ip, dev = self._ip, self._dev
+        if self._vip or guard.mode() == "off":
+            return self._send(api_watch(slug, season, episode, None if self._vip else guard.sess_open(ip)))
+        if self._pre("watch", slug):
+            return
+        if slug not in SHOWS:                         # unknown (or fake) anime: nothing to hand out
+            return self._send(api_watch(slug, season, episode, None))
+        if guard.check_score(ip, dev):                # Step 6: behaves like a bot -> banned (PROTECT=on)
+            self._banned = "bot score"
+            if self._quiet("watch"):
+                return
+        # 1. the anime's page must have been opened first (the website opens it and retries by itself)
+        if not guard.was_opened(ip, dev, slug):
+            if guard.violation("no_detail", ip, "video link for %s without opening its page" % slug, dev=dev):
+                return self._send({"error": "Pehle anime ka page kholo.", "open": True}, 403)
+        # 1a. Step 9: a TV pass is good for TV_VIDEOS different videos; after that the QR comes again
+        if self._tvn:
+            okv, _nv = captcha.tv_video(self._tvn, "%s:%s:%s" % (slug, season or "", episode or ""))
+            if not okv:
+                self._pass, self._tvn = False, ""
+                if guard.captcha_needed(ip, "TV pass: %d video ho gaye" % captcha.TV_VIDEOS, dev=dev):
+                    return self._send({"error": "TV ke liye naya QR scan karo.", "captcha": True, "why": "tv pass khatam"}, 403)
+        # 1b. Step 7: unusual activity (many videos at once / bot score) -> game captcha, unless one was passed lately
+        if not self._pass:
+            why = self._captcha_why(slug, season, episode)
+            if why and guard.captcha_needed(ip, why, dev=dev):
+                return self._send({"error": "Ek chhota game khelo, phir video chalega.", "captcha": True, "why": why}, 403)
+        # 2. guest: max GUEST_MAX different videos, then sign-in
+        try:
+            u = accounts.user_for(self._token())
+        except Exception:
+            u = None
+        if not u and guard.guest_start(ip, dev, "%s:%s:%s" % (slug, season or "", episode or "")):
+            return self._send({"error": "Guest ke %d video ho gaye. Aage ke liye sign in karo." % guard.GUEST_MAX,
+                               "signin": True}, 401)
+        # 3. at most CONC_MAX streams at the same time from one IP
+        if guard.conc_check(ip, dev):                 # (True only when PROTECT=on)
+            if not self._pass:                        # Step 7: too many at once -> captcha first, not a plain error
+                return self._send({"error": "Ek chhota game khelo, phir video chalega.", "captcha": True,
+                                   "why": "ek saath %d se zyada video" % guard.CONC_MAX}, 403)
+            if len(guard.live_streams(ip)) >= captcha.CONC_HARD:     # even a proven human has a ceiling
+                return self._send({"error": "Is IP se %d se zyada video ek saath nahi chal sakte." % captcha.CONC_HARD,
+                                   "busy": True}, 429)
+        sess = guard.sess_open(ip, dev=dev)
+        if u and sess:                                # Step 10: one account = one stream, the latest wins
+            old = guard.acct_stream(u["id"], sess["sid"], "%s:%s:%s" % (slug, season or "", episode or ""), dev, ip)
+            if old:
+                guard.sess_end(old)
+        if self._tvn and sess:                        # Step 9: one TV pass = one stream, the latest wins
+            old = captcha.tv_stream(self._tvn, sess["sid"], "%s:%s:%s" % (slug, season or "", episode or ""))
+            if old:
+                guard.sess_end(old)
+        self._send(api_watch(slug, season, episode, sess))
+
+    def _captcha_why(self, slug, season, episode):
+        """Step 7: is there a reason to ask the game captcha?  -> text, or "" (all normal)."""
+        try:
+            n = captcha.burst(self._ip, "%s:%s:%s" % (slug, season or "", episode or ""))
+            if n >= captcha.BURST_MAX:
+                return "%d alag video %d sec me" % (n, captcha.BURST_WIN)
+            sc, why = guard.score_of(self._ip, self._dev)
+            if sc >= guard.FLAG_SCORE:
+                return "bot score %d%% (%s)" % (sc, "; ".join(why)[:120])
+        except Exception:
+            pass
+        return ""
+
+    def _is_admin(self):
+        key = os.environ.get("ADMIN_KEY", "")
+        given = self.headers.get("X-Admin-Key") or ""
+        return bool(key) and hmac.compare_digest(given.encode(), key.encode())
+
+    def _captcha(self, path, b):
+        """/api/captcha/new | verify | status  (Step 7).  The admin key unlocks lab mode (own type / numbers,
+        full detail back) for the game lab of Step 8."""
+        ip, dev = self._ip, self._dev
+        if path == "/api/captcha/status":
+            return self._send({"pass": bool(self._pass or self._vip), "vip": bool(self._vip), "mode": guard.mode(),
+                               "tv": bool(self._tvn), "tv_left": captcha.tv_left(self._tvn) if self._tvn else 0})
+        if path not in ("/api/captcha/new", "/api/captcha/verify"):
+            return self._send({"error": "not found"}, 404)
+        if self._banned and self._quiet("captcha"):               # banned: quiet, slow, nothing to learn from
+            return
+        lab = bool(b.get("lab")) and self._is_admin()
+        if not lab and self._limit("captcha", 60, 20, 8, "/api/captcha"):      # the admin's game lab plays freely
+            return
+        if path == "/api/captcha/new":
+            g = captcha.new(ip, dev, typ=b.get("type") if lab else None, over=b.get("cfg") if lab else None)
+            if not g:
+                return self._send({"error": "captcha error"}, 500)
+            return self._send(g)
+        return self._send(captcha.verify(b.get("id"), ip, b, lab=lab))
+
+    def _tv(self, path, b):
+        """/api/tv/new | poll | done | check  (Step 9).  The TV shows a QR, a phone plays the game, the TV gets a pass."""
+        ip = self._ip
+        if self._banned and self._quiet("captcha"):               # banned: quiet and slow, like the captcha routes
+            return
+        if path == "/api/tv/new":
+            if self._limit("tvnew", 60, 8, 4, "/api/tv/new"):
+                return
+            g = captcha.tv_new(ip)
+            return self._send(g) if g else self._send({"error": "tv error"}, 500)
+        if path == "/api/tv/poll":                                # the TV asks every 2 s (2 TVs on one IP fit)
+            if self._limit("tvpoll", 60, 120, 60, "/api/tv/poll"):
+                return
+            return self._send(captcha.tv_poll(b.get("pid"), ip))
+        if path == "/api/tv/check":                               # the phone page: is this code still open?
+            if self._limit("tvcheck", 60, 20, 10, "/api/tv/check"):
+                return
+            return self._send({"ok": captcha.tv_peek(b.get("code"))})
+        if path == "/api/tv/done":                                # the phone hands in the pass of the game it just won
+            if self._limit("tvdone", 60, 10, 6, "/api/tv/done"):
+                return
+            ok, why = captcha.tv_finish(b.get("code"), ip, self.headers.get("X-Captcha"))
+            return self._send({"ok": True}) if ok else self._send({"ok": False, "why": why}, 400)
+        return self._send({"error": "not found"}, 404)
+
+    def _mq_gate(self, tok, want, any_z=False):
+        """Check a /mq link (and its session).  Returns the zipper, or None after answering the request.
+        want: "s" playlist/segments, "d" download.  Old unbound links (Stremio) skip the session check."""
+        p = _mq_parse(tok)
+        if not p or not p["z"].startswith("https://" if any_z else "https://codedew.com/"):
+            self._send({"error": "bad token"}, 400)
+            return None
+        if self._banned and self._quiet("mq"):          # Step 6: banned visitor, old link
+            return None
+        if p["sid"] and not self._vip:
+            why = guard.sess_check(p, self._ip, want)
+            if why and guard.violation("session:" + why, self._ip, "/mq " + want):
+                self._send({"error": "session " + why, "renew": True, "why": why}, 403)
+                return None
+        self._mqtok = tok
+        self._mquid = p.get("uid") or ""
+        return p["z"]
+
+    def _dl_slot(self, tok):
+        """Count a running download (max DL_MAX at once per account).  Returns the key to release,
+        "" = nothing to release, None = refused (answer already sent)."""
+        p = _mq_parse(tok)
+        if not p or not p["sid"] or self._vip:
+            return ""
+        key = ("u" + p["uid"]) if p.get("uid") else ("i" + p["ipk"])
+        n = guard.dl_begin(key)
+        if n > guard.DL_MAX and guard.violation("dl_limit", self._ip, "%d downloads at once (%s)" % (n, key)):
+            guard.dl_end(key)
+            self._send({"error": "Ek saath max %d download. Pehla khatam hone do." % guard.DL_MAX}, 429)
+            return None
+        return key
 
     def _token(self):
         a = self.headers.get("Authorization") or ""
@@ -3693,7 +4038,7 @@ class Handler(BaseHTTPRequestHandler):
     def _admin(self, path, b):
         """Admin API. Disabled unless the ADMIN_KEY env var is set."""
         key = os.environ.get("ADMIN_KEY", "")
-        ip = (self.headers.get("X-Forwarded-For") or self.client_address[0]).split(",")[0].strip()
+        ip = getattr(self, "_ip", None) or guard.client_ip(self.headers, self.client_address[0])
         bad = _admin_fails.get(ip, (0, 0))
         if bad[0] >= 5 and time.time() - bad[1] < 600:
             return self._send({"error": "Too many attempts. Try again in 10 minutes."}, 429)
@@ -3743,6 +4088,45 @@ class Handler(BaseHTTPRequestHandler):
             elif act != "status":
                 return self._send({"error": "unknown action"}, 400)
             return self._send(_force_state_view())
+        if path == "/api/admin/captcha":
+            act = str(b.get("action") or "stats")
+            if act == "cfg":
+                captcha.set_cfg(b.get("cfg"), reset=bool(b.get("reset")), save=True)     # Step 8: kept in the DB too
+            elif act != "stats":
+                return self._send({"error": "unknown action"}, 400)
+            return self._send(captcha.stats())
+        if path == "/api/admin/guard":
+            act = str(b.get("action") or "info")
+            try:
+                if act == "mode":
+                    guard.set_mode(b.get("mode"))
+                elif act == "vip_new":
+                    res = guard.vip_new(b.get("name"))
+                    return self._send({**res, **guard.info(self.headers, self.client_address[0])})
+                elif act == "vip_del":
+                    if not guard.vip_del(b.get("id")):
+                        return self._send({"error": "Key nahi mili."}, 404)
+                elif act == "ban":
+                    try:
+                        hrs = max(0.0, min(24 * 365.0, float(b.get("hours") or 0)))
+                    except Exception:
+                        hrs = 0.0
+                    guard.ban(b.get("key"), "admin ne ban kiya", hrs)
+                elif act == "unban":
+                    if not guard.unban(b.get("key")):
+                        return self._send({"error": "Ye ban list me nahi tha."}, 404)
+                elif act not in ("info", "bots"):
+                    return self._send({"error": "unknown action"}, 400)
+            except ValueError as e:
+                return self._send({"error": str(e)}, 400)
+            except Exception as e:           # database down: say so, do not crash the panel
+                return self._send({"error": "Database error: %s" % e}, 500)
+            res_ = guard.info(self.headers, self.client_address[0])
+            res_["captcha"] = captcha.stats()
+            if act in ("bots", "ban", "unban"):
+                res_["bots"] = guard.bot_list()
+                res_["ban_list"] = guard.ban_list()
+            return self._send(res_)
         err = None
         if path == "/api/admin/password":
             err = accounts.admin_set_password(str(b.get("username", "")), str(b.get("password", "")))
@@ -3755,16 +4139,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._is_head = False
         path = unquote(urlparse(self.path).path)
+        self._gctx(parse_qs(urlparse(self.path).query))
         try:
             b = self._body()
             if path.startswith("/api/admin/"):
                 return self._admin(path, b)
+            if path.startswith("/api/captcha/"):
+                return self._captcha(path, b)
+            if path.startswith("/api/tv/"):
+                return self._tv(path, b)
             if path in ("/api/signup", "/api/login"):
-                fn = accounts.signup if path == "/api/signup" else accounts.login
-                tok, err = fn(str(b.get("username", "")).strip(), str(b.get("password", "")))
-                if err:
-                    return self._send({"error": err}, 400)
-                return self._send({"token": tok, "user": accounts.user_for(tok)})
+                return self._auth(path, b)
             if path == "/api/logout":
                 accounts.logout(self._token())
                 return self._send({"ok": True})
@@ -3772,6 +4157,8 @@ class Handler(BaseHTTPRequestHandler):
             if not u:
                 return self._send({"error": "Please sign in."}, 401)
             if path == "/api/progress":
+                if not self._vip:
+                    guard.track("prog", self._ip, self._dev)
                 slug = str(b.get("slug", ""))[:100]
 
                 def _save(uid=u["id"], b=b, slug=slug):
@@ -3796,10 +4183,92 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send({"error": str(exc)}, 500)
 
+    def _auth(self, path, b):
+        """/api/signup and /api/login (Step 10).
+        Signup: game captcha ALWAYS (one passed game pays for ONE account), max SIGNUP_MAX accounts per IP (DB).
+        Sign-in: captcha only when it looks like guessing (many wrong passwords / many tries).
+        PROTECT=off: nothing extra.  log: only writes it down.  on: real 403 {captcha:true} / 429.  VIP: no rule."""
+        ip, dev = self._ip, self._dev
+        user, pw = str(b.get("username", "")).strip(), str(b.get("password", ""))
+        guarded = (not self._vip) and guard.mode() != "off"
+        tok_in = self.headers.get("X-Captcha")
+        if guarded and self._banned and self._quiet("auth"):
+            return
+        if path == "/api/signup":
+            if guarded:
+                if self._limit("signup", 60, 10, 5, "/api/signup"):
+                    return
+                # 1. captcha every time: a pass that already paid for an account does not count again
+                if (not self._pass or captcha.signup_spent(tok_in)) and guard.captcha_needed(ip, "signup (hamesha)", dev=dev):
+                    return self._send({"error": "Account banane se pehle ek chhota game khelo.", "captcha": True,
+                                       "why": "signup"}, 403)
+                # 2. at most SIGNUP_MAX accounts from one IP (counted in the database)
+                n = accounts.signup_count(guard.ip_key(ip))
+                if n >= accounts.SIGNUP_MAX and guard.violation("signup_ip", ip, "%d account / %dh" % (n, accounts.SIGNUP_HOURS), dev=dev):
+                    return self._send({"error": "Is network se %d account ban chuke hain. Apne account se sign in karo, ya baad me try karo." % accounts.SIGNUP_MAX}, 429)
+            tok, err = accounts.signup(user, pw, guard.ip_key(ip) if guarded else "")
+            if err:
+                return self._send({"error": err}, 400)
+            if guarded and self._pass:
+                captcha.signup_spend(tok_in)
+            return self._send({"token": tok, "user": accounts.user_for(tok)})
+        # sign-in
+        if guarded:
+            why = guard.login_why(ip, user)
+            if why and not self._pass and guard.captcha_needed(ip, "signin: " + why, dev=dev):
+                return self._send({"error": "Ek chhota game khelo, phir sign in hoga.", "captcha": True, "why": why}, 403)
+            if guard.login_hard(ip, user):
+                return self._send({"error": "Bahut koshish ho gayi. Thodi der baad try karo."}, 429)
+        tok, err = accounts.login(user, pw)
+        if guarded:
+            guard.login_note(ip, user, not err)
+        if err:
+            return self._send({"error": err}, 400)
+        return self._send({"token": tok, "user": accounts.user_for(tok)})
+
+    def _wn_route(self, target, b64, attach=None):
+        """WN file through our own proxy.  attach = file name -> a download (200 + attachment)."""
+        if target.startswith("https://codedew.com/"):
+            # zipper payload: resolve FRESH at play time - the
+            # card may be hours old, the file link is not
+            u, _kind = _wn_resolve(target, stale_ok=False)
+            if not u:
+                with _hls_lock:
+                    _wn_cache.pop(target, None)
+                u, _kind = _wn_resolve(target, stale_ok=False)
+            if not u:
+                self._send({"error": "wn resolve failed"}, 502)
+                return
+            self.close_connection = True
+            _serve_wn_slice(self, _u64(u), attach)
+            return
+        if "workers.dev/" in target:     # worker-wrapped (legacy)
+            inner = _wn_inner(target)
+            if not inner.startswith("https://"):
+                self._send({"error": "bad direct"}, 400)
+                return
+            _serve_m3u8_child(self, "", _u64(inner), ".mkv")
+            return
+        # legacy bare-URL payload: known file hosts only
+        if not (target.startswith("https://")
+                and ("googleusercontent.com" in target
+                     or "cloudflarestorage.com" in target)):
+            self._send({"error": "bad direct"}, 400)
+            return
+        self.close_connection = True
+        _serve_wn_slice(self, b64, attach)
+        return
+
     def _route(self):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         qs = parse_qs(parsed.query)
+        mv = re.match(r"^/vk/([A-Za-z0-9_\-]{8,200})(/.*)$", path)
+        if mv:                                            # Stremio addon link with the VIP key inside: /vk/<key>/manifest.json
+            qs = dict(qs)
+            qs["vk"] = [mv.group(1)]
+            path = mv.group(2)
+        self._gctx(qs)
         _public_base_holder["base"] = public_base_from(self)
         try:
             if path.rstrip("/") in ("", "/"):
@@ -3828,6 +4297,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             m = re.match(r"^/img/s/([a-z0-9_]+)$", path)
             if m:
+                if guard.is_decoy(m.group(1)):             # Step 6: a fake anime's poster
+                    self._trap(m.group(1), "poster")
+                    return self._send({"error": "no image"}, 404)
                 rec = SHOWS.get(m.group(1))
                 if not rec or not rec.get("poster"):
                     return self._send({"error": "no image"}, 404)
@@ -3840,6 +4312,40 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/admin":
                 with open(os.path.join(BASE_DIR, "admin.html"), "rb") as fh:
                     self._send_raw(fh.read(), "text/html; charset=utf-8")
+                return
+            if path == "/tv":                                  # Step 9: the phone page a TV's QR opens
+                try:
+                    with open(os.path.join(BASE_DIR, "tvpass.html"), "rb") as fh:
+                        body_ = fh.read()
+                except Exception:
+                    return self._send({"error": "not found"}, 404)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body_)))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Referrer-Policy", "no-referrer")     # the code is in the address: do not pass it on
+                self.end_headers()
+                if not self._is_head:
+                    self.wfile.write(body_)
+                return
+            if path == "/api/tv/check":                        # Step 9: GET version for the phone page
+                q_ = parse_qs(urlparse(self.path).query)
+                return self._tv(path, {"code": (q_.get("c") or [""])[0]})
+            if path in ("/captcha-lab", "/captcha.js"):          # Step 8: the game (loaded only when needed) and its lab page
+                try:
+                    isjs = path == "/captcha.js"
+                    with open(os.path.join(BASE_DIR, "captcha.js" if isjs else "captcha-lab.html"), "rb") as fh:
+                        body_ = fh.read()
+                except Exception:
+                    return self._send({"error": "not found"}, 404)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8" if isjs else "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body_)))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                if not self._is_head:
+                    self.wfile.write(body_)
                 return
             if path == "/api/me":
                 u = accounts.user_for(self._token())
@@ -3856,6 +4362,10 @@ class Handler(BaseHTTPRequestHandler):
                 u = accounts.user_for(self._token())
                 return self._send({"seen": accounts.get_seen(u["id"], m.group(1)) if u else []})
             if path == "/api/shows":
+                if not self._vip:
+                    guard.track("shows", self._ip, self._dev)
+                    if self._limit("shows", 60, guard.SHOWS_IP_MIN, guard.SHOWS_DEV_MIN, "/api/shows"):
+                        return
                 raw, gz = shows_payload()
                 use_gz = "gzip" in (self.headers.get("Accept-Encoding") or "")
                 body = gz if use_gz else raw
@@ -3871,15 +4381,36 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._is_head:
                     self.wfile.write(body)
                 return
+            if path == "/api/captcha/status":                  # Step 7: do I hold a valid pass?
+                return self._captcha(path, {})
             m = re.match(r"^/api/watch/([a-z0-9_]+)(?:/(\d+)/(\d+))?$", path)
             if m:
-                self._send(api_watch(m.group(1), m.group(2), m.group(3)))
+                self._watch(m.group(1), m.group(2), m.group(3))
+                return
+            m = re.match(rf"^/api/hb/({_B64_RE}+)$", path)
+            if m:
+                if not self._vip:
+                    guard.track("hb", self._ip, self._dev)
+                self._send(api_hb(m.group(1), self._ip, self._vip))
+                return
+            m = re.match(rf"^/api/dltok/({_B64_RE}+)$", path)
+            if m:
+                try:
+                    u_ = None if self._vip else accounts.user_for(self._token())
+                except Exception:
+                    u_ = None
+                body_, code_ = api_dltok(m.group(1), self._ip, self._vip, (u_ or {}).get("id"))
+                self._send(body_, code_)
                 return
             m = re.match(r"^/api/skip/([a-z0-9_]+)(?:/(\d+)/(\d+))?$", path)
             if m:
+                if self._pre("skip", m.group(1)):
+                    return
                 self._send(api_skip(m.group(1), int(m.group(2) or 1), int(m.group(3) or 1)))
                 return
             if path == "/manifest.json":
+                if self._limit("manifest", 60, guard.MANIFEST_MIN, 0, "/manifest.json"):
+                    return
                 self._send(handle_manifest(_public_base_holder["base"]))
                 return
             static = {"/logo.png": ("icon-512.png", "image/png"), "/icon-192.png": ("icon-192.png", "image/png"),
@@ -3905,6 +4436,14 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/meta/(series|movie)/(raretoons2:.+)\.json$",
                          path)
             if m:
+                if not self._vip:
+                    mslug = m.group(2).split(":")[1]
+                    if self._pre("meta", mslug):
+                        return
+                    if (self._limit("meta_burst", guard.META_WIN, guard.META_MAX, guard.META_MAX, "/meta")
+                            or self._limit("meta_min", 60, guard.META_MIN_MAX, 0, "/meta")):
+                        return
+                    guard.open_mark(self._ip, self._dev, mslug)     # its video links may now be asked for
                 meta = handle_meta(m.group(1), m.group(2))
                 self._send({"meta": meta} if meta else {"meta": {}},
                            200 if meta else 404)
@@ -3913,75 +4452,71 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/stream/(series|movie)/"
                          r"(raretoons2:[^/]+|tt\d+(?::\d+)*)\.json$", path)
             if m:
+                if not self._vip:
+                    sid_ = m.group(2).split(":")
+                    if self._pre("stream", sid_[1] if sid_[0] == "raretoons2" and len(sid_) > 1 else None):
+                        return
+                    if self._limit("stream", 60, guard.STREAM_MIN, 0, "/stream"):     # Stremio: only a rate limit
+                        return
                 self._send(handle_stream(m.group(1), m.group(2)))
                 return
 
             m = re.match(rf"^/mq/({_B64_RE}+)\.m3u8$", path)
             if m:
-                zipper = _mq_decode_token(m.group(1))
-                if not zipper.startswith("https://codedew.com/"):
-                    self._send({"error": "bad token"}, 400)
+                zipper = self._mq_gate(m.group(1), "s")
+                if zipper is None:
                     return
                 _serve_m3u8_master(self, zipper)
                 return
 
             m = re.match(rf"^/mq/({_B64_RE}+)/dl/({_B64_RE}+)(\.[A-Za-z0-9]{{1,5}})?$", path)
             if m:
-                zipper = _mq_decode_token(m.group(1))
-                if not zipper.startswith("https://codedew.com/"):
-                    self._send({"error": "bad token"}, 400)
+                zipper = self._mq_gate(m.group(1), "d")
+                if zipper is None:
                     return
-                _serve_download(self, zipper, m.group(2),
-                                (qs.get("name", [""])[0] if qs else ""),
-                                check=bool(qs and qs.get("check")))
+                slot = self._dl_slot(m.group(1))
+                if slot is None:
+                    return
+                try:
+                    _serve_download(self, zipper, m.group(2),
+                                    (qs.get("name", [""])[0] if qs else ""),
+                                    check=bool(qs and qs.get("check")))
+                finally:
+                    if slot:
+                        guard.dl_end(slot)
                 return
 
             m = re.match(rf"^/mq/({_B64_RE}+)/u/({_B64_RE}+)"
                          rf"(\.[A-Za-z0-9]{{1,5}})?$", path)
             if m:
-                zipper = _mq_decode_token(m.group(1))
-                if not zipper.startswith("https://codedew.com/"):
-                    self._send({"error": "bad token"}, 400)
+                zipper = self._mq_gate(m.group(1), "s")
+                if zipper is None:
                     return
                 _serve_m3u8_child(self, zipper, m.group(2),
                                   (m.group(3) or ".ts").lower(),
                                   rt=(qs.get("rt", [""])[0] if qs else ""))
                 return
 
-            m = re.match(rf"^/wn/({_B64_RE}+)$", path)
+            m = re.match(rf"^/wn/({_B64_RE}+)(/dl)?$", path)
             if m:
-                target = _u64d(m.group(1))
-                if target.startswith("https://codedew.com/"):
-                    # zipper payload: resolve FRESH at play time - the
-                    # card may be hours old, the file link is not
-                    u, _kind = _wn_resolve(target, stale_ok=False)
-                    if not u:
-                        with _hls_lock:
-                            _wn_cache.pop(target, None)
-                        u, _kind = _wn_resolve(target, stale_ok=False)
-                    if not u:
-                        self._send({"error": "wn resolve failed"}, 502)
+                tok_, b64_ = m.group(1), m.group(1)
+                pw = _mq_parse(tok_)
+                if pw and pw["sid"]:                     # session-bound WN link (Step 4)
+                    if self._mq_gate(tok_, "d" if m.group(2) else "w", any_z=True) is None:
                         return
-                    self.close_connection = True
-                    _serve_wn_slice(self, _u64(u))
-                    return
-                if "workers.dev/" in target:     # worker-wrapped (legacy)
-                    inner = _wn_inner(target)
-                    if not inner.startswith("https://"):
-                        self._send({"error": "bad direct"}, 400)
+                    target = pw["z"]
+                    b64_ = _u64(target)
+                    attach = ((qs.get("name", [""])[0] if qs else "") or "video") if m.group(2) else None
+                    slot = self._dl_slot(tok_) if m.group(2) else ""
+                    if slot is None:
                         return
-                    _serve_m3u8_child(self, "", _u64(inner), ".mkv")
-                    return
-                # legacy bare-URL payload: known file hosts only
-                if not (target.startswith("https://")
-                        and ("googleusercontent.com" in target
-                             or "cloudflarestorage.com" in target)):
-                    self._send({"error": "bad direct"}, 400)
-                    return
-                self.close_connection = True
-                _serve_wn_slice(self, m.group(1))
-                return
-
+                else:
+                    target, attach, slot = _u64d(tok_), None, ""
+                try:
+                    return self._wn_route(target, b64_, attach)
+                finally:
+                    if slot:
+                        guard.dl_end(slot)
             self._send({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -4385,6 +4920,7 @@ def _startup():
 
 
 def main():
+    guard.start()                                                 # VIP keys + saved PROTECT mode (background)
     threading.Thread(target=_startup, daemon=True).start()        # port opens at once
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
