@@ -675,7 +675,7 @@ def _beh_rec(key, now):
     r = BEH.get(key)
     if r is None or now - r["t0"] > BEH_SECS:
         r = BEH[key] = {"t0": now, "last": now, "n": dict.fromkeys(_BEH_KINDS, 0),
-                        "viol": 0, "decoy": 0, "nodev": 0, "with": set()}
+                        "viol": 0, "decoy": 0, "nodev": 0, "fast": 0, "vid": "", "vid_t": 0.0, "with": set()}
     return r
 
 
@@ -734,6 +734,30 @@ def track(kind, ip, dev="", now=None):
         pass
 
 
+FAST_SECS = _env_num("FAST_SECS", 30)             # a different video asked for sooner than this after the last one = "fast switch"
+
+
+def watch_switch(video, ip, dev="", now=None):
+    """The visitor asked for `video`.  If it is a DIFFERENT video than his last one and he asked for it
+    before FAST_SECS seconds went by (a human watches an episode longer; a bot hops episode to episode),
+    one fast switch is counted.  The same video again (renew, seek, retry) is never counted."""
+    try:
+        if mode() == "off":
+            return
+        now = now or time.time()
+        video = str(video)
+        with _beh_lock:
+            for k in _beh_keys(ip, dev):
+                r = _beh_rec(k, now)
+                if r["vid"] and r["vid"] != video and now - r["vid_t"] < FAST_SECS:
+                    r["fast"] += 1
+                if r["vid"] != video:
+                    r["vid"], r["vid_t"] = video, now
+                r["last"] = now
+    except Exception:
+        pass
+
+
 def bot_score(rec):
     """-> (0..100, [reasons]).  A real visitor asks for a video AND for skip-intro, heartbeats,
     the anime's page ...; a bot asks only for the video, in bulk, and runs into the limits."""
@@ -755,6 +779,9 @@ def bot_score(rec):
     if w > 15:
         p = min(20, (w - 15) * 2)
         pts += p; why.append("ek ghante me %d video +%d" % (w, p))
+    if rec.get("fast", 0) >= 3:
+        p = min(60, 15 * rec["fast"])
+        pts += p; why.append("%d baar %d sec se pehle naya episode maanga +%d" % (rec["fast"], FAST_SECS, p))
     if rec["viol"]:
         p = min(25, 5 * rec["viol"])
         pts += p; why.append("%d baar limit todi +%d" % (rec["viol"], p))

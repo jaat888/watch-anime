@@ -3879,6 +3879,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(api_watch(slug, season, episode, None if self._vip else guard.sess_open(ip)))
         if self._pre("watch", slug):
             return
+        guard.watch_switch("%s:%s:%s" % (slug, season or "", episode or ""), ip, dev)   # episodes hopped faster than FAST_SECS = bot sign
         if slug not in SHOWS:                         # unknown (or fake) anime: nothing to hand out
             return self._send(api_watch(slug, season, episode, None))
         if guard.check_score(ip, dev):                # Step 6: behaves like a bot -> banned (PROTECT=on)

@@ -191,22 +191,27 @@ def layout(seed, typ, c):
         j = r.below(i + 1)
         perm[i], perm[j] = perm[j], perm[i]
     balls = []
+    rows = list(range(n))                                 # zigzag rows in a random order
+    for i in range(n - 1, 0, -1):
+        j = r.below(i + 1)
+        rows[i], rows[j] = rows[j], rows[i]
     for i in range(n):
-        b = {"c": perm[i], "ph": round(r.between(0, TAU), 4), "ph2": round(r.between(0, TAU), 4)}
+        d = 1 if r.below(2) else -1                       # every ball picks its own direction
+        b = {"c": perm[i], "ph": round(r.between(0, TAU), 4), "ph2": round(r.between(0, TAU), 4), "dir": d}
         if typ == 0:                                      # zigzag: sideways triangle wave, bobbing rows
-            b.update(f=round(r.between(0.22, 0.42), 4), g=round(r.between(1.3, 2.2), 4), y=50 + 36 * i)
+            b.update(f=round(r.between(0.18, 0.48), 4), g=round(r.between(1.0, 2.6), 4), y=50 + 36 * rows[i])
         elif typ == 1:                                    # orbit: ellipses of different size, both directions
-            b.update(f=round(r.between(0.8, 1.5), 4), dir=1 if (i + r.below(2)) % 2 else -1,
-                     rx=round(52 + 24 * i + r.between(-4, 4), 3), ry=round(26 + 13 * i + r.between(-3, 3), 3))
+            b.update(f=round(r.between(0.7, 1.7), 4),
+                     rx=round(52 + 24 * rows[i] + r.between(-8, 8), 3), ry=round(26 + 13 * rows[i] + r.between(-6, 6), 3))
         elif typ == 2:                                    # lissajous: wide wandering curves
-            b.update(f=round(r.between(0.7, 1.3), 4), g=round(r.between(1.0, 1.9), 4))
+            b.update(f=round(r.between(0.6, 1.5), 4), g=round(r.between(0.9, 2.2), 4))
         else:                                             # figure eight
-            b.update(f=round(r.between(0.7, 1.2), 4), ry=round(r.between(34, 52), 3))
+            b.update(f=round(r.between(0.6, 1.4), 4), ry=round(r.between(30, 56), 3))
         balls.append(b)
     ms = int(c["max_shots"])
     return {
         "type": typ, "n": n, "balls": balls,
-        "targets": [r.below(NCOL) for _ in range(ms + 4)],
+        "targets": [perm[r.below(n)] for _ in range(ms + 4)],   # only colours that are really on screen
         "skews": [round(r.between(-1, 1) * float(c["skew"]), 4) for _ in range(ms + 4)],
     }
 
@@ -219,6 +224,8 @@ def _tri(x):                                              # triangle wave, perio
 def ball_pos(L, i, t_ms, c):
     """Where ball i is at time t_ms.  The page uses the same formulas to draw it."""
     p, u, typ = L["balls"][i], t_ms / 1000.0 * float(c["speed"]), L["type"]
+    if typ != 1:
+        u *= p.get("dir", 1)
     if typ == 0:
         return 180.0 + 118.0 * _tri(u * p["f"] + p["ph"] / TAU), p["y"] + 20.0 * math.sin(u * p["g"] + p["ph2"])
     if typ == 1:
@@ -231,7 +238,7 @@ def ball_pos(L, i, t_ms, c):
 
 
 def ball_color(L, i, t_ms, c):
-    return (L["balls"][i]["c"] + int(t_ms // int(c["color_ms"]))) % NCOL
+    return L["balls"][i]["c"] % NCOL      # every ball keeps ONE colour all game (only its movement is random)
 
 
 def sim_shot(L, c, k, t_ms, a):

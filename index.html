@@ -988,7 +988,7 @@ function posterEl(s){const w=h("div",{class:"pw"}),f=()=>h("div",{class:"ph"},(s
 const ovEl=s=>{const L=s.langs||[],a=L.length?L[0]+(L.length>1?" +"+(L.length-1):""):"",n=s.movie?"Movie":(s.n?s.n+" ep":"");
   return a||n?h("div",{class:"ov"},a?h("span",{class:"lg"},a):null,n?h("span",{class:"en"},n):null):null};
 const thumb=s=>{const w=posterEl(s),o=ovEl(s);if(o)w.append(o);return w};
-function card(s,pct,onclick,left){const mem=!onclick&&pct==null&&SHOWS?frMap()[frKey(s)]:null,g=mem&&mem.length>1;return h("button",{class:"card","data-slug":s.slug,onclick:g?()=>seasonPicker(baseName(s.name)||s.name,mem):(onclick||(()=>go("#/show/"+s.slug)))},thumb(s),s.rating?h("div",{class:"rt"},"★ "+(+s.rating).toFixed(1)):null,g?h("div",{class:"badge"},mem.length+" SEASONS"):isNew(s)&&pct==null?h("div",{class:"badge"},"NEW"):null,pct!=null?h("div",{class:"prog"},h("i",{style:"width:"+pct+"%"})):null,h("div",{class:"t"},h("b",{},g?(baseName(s.name)||nm(s)):nm(s)),h("small",{class:left?"lf":""},left?left:g?mem.length+" seasons \u00b7 "+subOf(s):subOf(s))))}
+function card(s,pct,onclick,left){const mem=!onclick&&pct==null&&SHOWS?frMap()[frKey(s)]:null,g=mem&&seasonsN(mem)>1;return h("button",{class:"card","data-slug":s.slug,onclick:g?()=>seasonPicker(baseName(s.name)||s.name,mem):(onclick||(()=>go("#/show/"+s.slug)))},thumb(s),s.rating?h("div",{class:"rt"},"★ "+(+s.rating).toFixed(1)):null,g?h("div",{class:"badge"},mem.length+" SEASONS"):isNew(s)&&pct==null?h("div",{class:"badge"},"NEW"):null,pct!=null?h("div",{class:"prog"},h("i",{style:"width:"+pct+"%"})):null,h("div",{class:"t"},h("b",{},g?(baseName(s.name)||nm(s)):nm(s)),h("small",{class:left?"lf":""},left?left:g?mem.length+" seasons \u00b7 "+subOf(s):subOf(s))))}
 /* ---------- one card per anime: all its seasons grouped ---------- */
 const LANGW=/\s*[-\u2013]?\s*(hindi|tamil|telugu|malayalam|bengali|multi|dubbed|subbed|dub|sub|uncut|crunchyroll|jio\s*cinema)\b.*$/i;
 function baseName(n){n=String(n||"").replace(/\([^)]*\)/g," ").replace(LANGW,"").replace(/\bseason\s*\d+\b/ig," ").replace(/\bepisodes\b/ig," ");return n.replace(/\s+/g," ").replace(/^[\s\-\u2013]+|[\s\-\u2013]+$/g,"")}
@@ -999,6 +999,8 @@ const SEASONTAG=/season|\bpart\b|cour|hindi|tamil|telugu|dub|sub|multi|audio|cru
 const parenOf=s=>{const a=/\(([^)]{3,40})\)/.exec(s.name||"");return a?a[1]:""};
 const variantTag=s=>{const p=parenOf(s);if(/crunchy|jio|hotstar|netflix|prime|amazon|disney/i.test(p))return p;if(/\bsubbed\b|\bsub\b/i.test(s.name))return"Sub";if(/\bdubbed\b|\bdub\b/i.test(s.name))return"Dub";return""};
 function lbl0(s,i){const m=/season\s*0*(\d+)/i.exec(s.name),p=parenOf(s),arc=p&&!SEASONTAG.test(p)?" \u00b7 "+p:"";return(m?"Season "+(+m[1]):s.movie?"Movie":"Part "+(i+1))+arc}
+/* how many REAL seasons a franchise has: two dubs (or sub + dub) of the same season are ONE season, not two */
+function seasonsN(mem){const k=new Set();(mem||[]).forEach(x=>{const p=parenOf(x),arc=p&&!SEASONTAG.test(p)?p.toLowerCase():"";k.add(x.movie?"movie":(seasonNo(x)?"s"+seasonNo(x):"x")+"|"+arc)});return k.size}
 /* mem = all seasons of the anime: two hubs with the same season (Hindi dub / sub, JioHotstar / Crunchyroll) get a tag so the list never shows "Season 2" twice */
 function seasonLabel(s,i,mem){let L=lbl0(s,i);if(!mem||mem.length<2)return L;const same=mem.filter((x,k)=>lbl0(x,k)===L);if(same.length<2)return L;const v=variantTag(s);if(v)L+=" \u00b7 "+v;const same2=same.filter(x=>lbl0(x,0)+(variantTag(x)?" \u00b7 "+variantTag(x):"")===L);return same2.length>1?L+" ("+(same2.indexOf(s)+1)+")":L}
 function frMap(){if(FR)return FR;FR={};SHOWS.forEach(s=>{(FR[frKey(s)]=FR[frKey(s)]||[]).push(s)});
@@ -1006,7 +1008,7 @@ function frMap(){if(FR)return FR;FR={};SHOWS.forEach(s=>{(FR[frKey(s)]=FR[frKey(
 /* keep the first card of each anime, drop its other seasons */
 function dedupe(list){const seen=new Set();return list.filter(s=>{const k=frKey(s);if(seen.has(k))return false;seen.add(k);return true})}
 function seasonPicker(base,mem){
-  const m=modal(h("b",{style:"font-size:18px"},base),h("div",{class:"muted",style:"font-size:13px"},mem.length+" seasons \u00b7 pick one"),
+  const m=modal(h("b",{style:"font-size:18px"},base),h("div",{class:"muted",style:"font-size:13px"},(seasonsN(mem)>1?seasonsN(mem)+" seasons":mem.length+" versions")+" \u00b7 pick one"),
     ...mem.map((x,i)=>h("button",{class:"sr",onclick:()=>{m.remove();go("#/show/"+x.slug)}},h("div",{class:"th"},posterEl(x)),h("div",{style:"min-width:0"},h("b",{},seasonLabel(x,i,mem)),h("small",{},(x.n?x.n+" ep \u00b7 ":"")+subOf(x)))))
     ,h("button",{class:"back",onclick:()=>m.remove()},"Close"))}
 const subOf=s=>((s.langs||[]).length?s.langs.slice(0,2).join(" · ")+" Dub":"Anime")+(s.movie?" · Movie":"");
@@ -1158,7 +1160,7 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
       gl.length?h("div",{class:"hg"},gl.map(g=>h("span",{},g))):null,
       ds?(()=>{const p=h("p",{class:"hd"},ds),b=h("button",{class:"hmore",onclick:()=>{const o=p.classList.toggle("open");b.textContent=o?"Show less":"Show more"}},"Show more");return h("div",{},p,ds.length>150?b:null)})():null,
       h("div",{class:"row2"},play,fav,shr))))];
-  if(mem.length>1)kids.push(h("div",{class:"lbl",style:"margin-top:18px"},"Seasons"),h("div",{class:"chips"},mem.map((x,k)=>h("button",{class:"chip","aria-pressed":String(x.slug===slug),onclick:()=>{if(x.slug!==slug)go("#/show/"+x.slug)}},seasonLabel(x,k,mem)))));
+  if(mem.length>1)kids.push(h("div",{class:"lbl",style:"margin-top:18px"},seasonsN(mem)>1?"Seasons":"Versions"),h("div",{class:"chips"},mem.map((x,k)=>h("button",{class:"chip","aria-pressed":String(x.slug===slug),onclick:()=>{if(x.slug!==slug)go("#/show/"+x.slug)}},seasonLabel(x,k,mem)))));
   if(!s.movie){const pp=epProgAll(slug),se={};vids.forEach(v=>(se[v.season]=se[v.season]||[]).push(v));
     for(const n of Object.keys(se).sort((a,b)=>a-b))kids.push(h("h2",{class:"sec"},"Season "+n),h("div",{class:"eps epl"},se[n].map(v=>h("button",{"data-k":v.season+":"+v.episode,class:"ep epc"+(last&&last.season==v.season&&last.episode==v.episode?" cur":""),title:v.title||"",onclick:()=>go("#/watch/"+slug+"/"+v.season+"/"+v.episode)},h("span",{class:"en"},String(v.episode)),h("span",{class:"ec"},h("span",{class:"et"},epTitle(v)||"Episode "+v.episode),h("span",{class:"es"},"Season "+v.season+" \u00b7 Episode "+v.episode+(pp[v.season+":"+v.episode]>=95?" \u00b7 \u2713 Watched":pp[v.season+":"+v.episode]>0?" \u00b7 "+pp[v.season+":"+v.episode]+"% watched":""))),h("span",{class:"eg"},"\u25B6"),pp[v.season+":"+v.episode]>0?h("i",{class:"epbar",style:"width:"+Math.min(100,pp[v.season+":"+v.episode])+"%"}):null))));
     if(!vids.length)kids.push(h("p",{class:"muted"},"No episodes found."))}
