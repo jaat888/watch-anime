@@ -82,6 +82,16 @@
         </div>
         <div class="mut" style="margin-top:6px">"database disk image is malformed" = the file inside the worker is damaged. Try <b>Reload from Telegram</b> (goes back to the last backup; changes after it are lost).</div>
       </div>
+      <div class="card" id="catcard">
+        <div class="mut">Anime list (site se sync)</div>
+        <div id="catst" class="msg" style="margin:6px 0">-</div>
+        <div class="row wrapx">
+          <button id="catfull">Force FULL update</button>
+          <button class="ghost" id="catrec">Quick update</button>
+          <button class="ghost" id="catchk">Status</button>
+        </div>
+        <div class="mut" style="margin-top:6px"><b>Full</b> = poori site (archive + sitemap) walk karke jo anime list me nahi hain woh add karta hai. Slow hai (kai minute). <b>Quick</b> = sirf naye posts.</div>
+      </div>
       <input id="search" placeholder="Search username...">
       <div id="msg" class="msg"></div>
       <div class="tw"><table>
@@ -143,12 +153,34 @@ async function dbAct(action, confirmIt) {
 $("dbchk").onclick = () => dbAct("check");
 $("dbsync").onclick = () => dbAct("sync");
 $("dbdisc").onclick = () => { if (confirm("Reload the database from the last Telegram backup? Newer changes are lost.")) dbAct("discard", true); };
+let CTIMER = null;
+function catText(j) {
+  const el = Math.max(0, Math.round((j.now - j.started)));
+  if (j.running) return `RUNNING (${j.mode}) ${el}s - shows now: ${j.shows_now}`;
+  if (j.busy) return `Auto update chal raha hai (background)... shows now: ${j.shows_now}`;
+  if (j.error) return "FAILED: " + j.error;
+  if (j.finished) return `Done (${j.mode}): shows ${j.before} -> ${j.after} (+${j.after - j.before}) | ${JSON.stringify(j.summary || {})}`;
+  return `Idle - shows in list: ${j.shows_now}`;
+}
+async function catAct(action, full) {
+  const el = $("catst");
+  try {
+    const j = await api("/api/admin/catalog", {action, full: full !== false});
+    say(el, catText(j), j.error ? "err" : (j.running || j.busy ? "" : "ok"));
+    clearInterval(CTIMER);
+    if (j.running || j.busy) CTIMER = setInterval(() => catAct("status"), 4000);
+  } catch (e) { clearInterval(CTIMER); say(el, e.message, "err"); }
+}
+$("catfull").onclick = () => { if (confirm("Poori site se FULL update start karein? (slow, kai minute)")) catAct("start", true); };
+$("catrec").onclick = () => catAct("start", false);
+$("catchk").onclick = () => catAct("status");
 async function login() {
   KEY = $("key").value.trim() || KEY;
   try {
     await load();
     try { sessionStorage.setItem("ak", KEY); } catch(e) {}
     $("login").classList.add("hide"); $("panel").classList.remove("hide");
+    catAct("status");
   } catch(e) { say($("lmsg"), e.message, "err"); }
 }
 $("go").onclick = login;

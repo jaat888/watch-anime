@@ -3684,6 +3684,15 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send({"error": "clear failed: %s" % e}, 500)
             return self._send({"ok": True})
+        if path == "/api/admin/catalog":
+            act = str(b.get("action") or "status")
+            if act == "start":
+                ok, msg = _force_catalog_start(bool(b.get("full", True)))
+                if not ok:
+                    return self._send({"error": msg, **_force_state_view()}, 409)
+            elif act != "status":
+                return self._send({"error": "unknown action"}, 400)
+            return self._send(_force_state_view())
         err = None
         if path == "/api/admin/password":
             err = accounts.admin_set_password(str(b.get("username", "")), str(b.get("password", "")))
@@ -4174,6 +4183,64 @@ def _catalog_refresh():
         except Exception as e:
             print("[rt2] catalog refresh failed:", e, flush=True)
         time.sleep(gap)
+
+
+# ---- admin: force a catalog update from the site, right now ---------------
+_force_state = {"running": False, "mode": "", "started": 0.0, "finished": 0.0,
+                "before": 0, "after": 0, "summary": None, "error": ""}
+
+
+def _force_state_view():
+    v = dict(_force_state)
+    v["shows_now"] = len(SHOWS)
+    v["busy"] = _INDEX_LOCK.locked()          # auto refresh may hold it too
+    v["now"] = time.time()
+    return v
+
+
+def _force_catalog_worker(full):
+    try:
+        _force_state["before"] = len(SHOWS)
+        summary = refresh_index_run(full)
+        _reload_catalog()
+        _force_state["after"] = len(SHOWS)
+        _force_state["summary"] = summary
+        now = time.time()
+        _kv_put("t_catalog", now)
+        if full:
+            _kv_put("t_catalog_full", now)
+        applog.info("admin", f"forced catalog update ({'full' if full else 'recent'}) done: "
+                             f"{_force_state['before']} -> {_force_state['after']} shows, {summary}")
+    except Exception as e:
+        _force_state["error"] = repr(e)
+        applog.log_once("force-cat", 5, "error", "admin", f"forced catalog update failed: {e!r}")
+    finally:
+        _force_state["running"] = False
+        _force_state["finished"] = time.time()
+        _INDEX_LOCK.release()
+
+
+def refresh_index_run(full):
+    import refresh_index
+    return refresh_index.run(quiet=True, full=full)
+
+
+def _force_catalog_start(full=True):
+    """Starts the site->catalog refresh in a background thread (full=True
+    walks the whole archive + sitemap). Returns (ok, message)."""
+    if not _INDEX_LOCK.acquire(blocking=False):
+        return False, "A catalog update is already running - wait for it to finish."
+    _force_state.update(running=True, mode="full" if full else "recent", started=time.time(),
+                        finished=0.0, summary=None, error="", before=len(SHOWS), after=0)
+    try:
+        threading.Thread(target=_force_catalog_worker, args=(bool(full),), daemon=True,
+                         name="force-catalog").start()
+    except Exception as e:
+        _force_state.update(running=False, error=repr(e))
+        _INDEX_LOCK.release()
+        return False, "could not start: %r" % e
+    applog.info("admin", f"forced catalog update started ({'full' if full else 'recent'})")
+    return True, "started"
 
 
 def _sync_once():
