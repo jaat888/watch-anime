@@ -1804,17 +1804,67 @@ def _ep_titles(rec, wait=0.0):
 
 
 
+_live_inflight = {}          # hub -> Event, set when that hub's live refresh finished
+META_LIVE_WAIT = float(os.environ.get("META_LIVE_WAIT", "0.5"))
+
+
+def _live_soft(rec, wait):
+    """Like _absorb_live(rec, _live_rows(rec)) but the CALLER waits at most
+    `wait` seconds: a cold hub fetch (Cloudflare-fronted site, 5-10 s) keeps
+    running in the background and merges when done.  -> True if finished."""
+    hub = rec.get("hub")
+    if not hub:
+        return True
+    with _live_lock:
+        hit = _live_cache.get(hub)
+        fresh = bool(hit and hit[0] > time.time())
+        ev = None if fresh else _live_inflight.get(hub)
+        start = False
+        if not fresh and ev is None:
+            ev = _live_inflight[hub] = threading.Event()
+            start = True
+    if fresh:
+        _absorb_live(rec, hit[1])
+        return True
+    if start:
+        def _run(rec=rec, hub=hub, ev=ev):
+            try:
+                _absorb_live(rec, _live_rows(rec))
+            except Exception:
+                pass
+            finally:
+                with _live_lock:
+                    _live_inflight.pop(hub, None)
+                ev.set()
+        threading.Thread(target=_run, daemon=True, name="live-soft").start()
+    return ev.wait(wait)
+
+
 def handle_meta(mtype, mid):
     slug = mid.split(":", 1)[1] if ":" in mid else mid
     rec = SHOWS.get(slug)
     if not rec:
         return None
-    try:
-        _absorb_live(rec, _live_rows(rec))
+    # SPEED: the detail page used to wait for the live hub fetch (5-10 s when
+    # the cache was cold), then the poster fetch (up to 10 s), then TMDB (3 s).
+    # Now: a show that already has episodes opens at once (live refresh keeps
+    # running in the background, 2 s max wait); only a show with NO episodes
+    # yet (brand-new) waits for the site.
+    t_meta = time.monotonic()
+    META_BUDGET = 1.0                     # ONE shared wait for everything below
+    try:                                  # start TMDB info + episode titles NOW
+        _show_info(rec, wait=0)           # (background threads) so the site
+        _ep_titles(rec, wait=0.0)         # fetch, TMDB and titles run in PARALLEL
     except Exception:
         pass
+    try:
+        with STORE_LOCK:
+            has_eps = bool(rec["eps"])
+        live_done = _live_soft(rec, META_LIVE_WAIT if has_eps else RESOLVE_TIMEOUT + 4)
+    except Exception:
+        live_done = True
     if not rec.get("poster"):
-        _fetch_poster(rec)
+        _bg_once(("poster", slug), lambda rec=rec: _fetch_poster(rec))
     if rec.get("movie"):
         # SPEED: the detail page opens ~1-3 s before the play tap ->
         # walk this movie's zippers in the background NOW so the
@@ -1841,7 +1891,7 @@ def handle_meta(mtype, mid):
             except Exception:
                 pass
         _bg_once(("prewarm-movie", slug), _prewarm)
-    info = _show_info(rec, wait=3)
+    info = _show_info(rec, wait=max(0.0, META_BUDGET - (time.monotonic() - t_meta)))
     meta = {
         "id": mid,
         "type": mtype,
@@ -1871,12 +1921,12 @@ def handle_meta(mtype, mid):
                 vids.append({"id": f"raretoons2:{slug}:{s}:{e}",
                              "season": s, "episode": e,
                              "title": title, "name": title})
-        titles, pending = _ep_titles(rec, wait=1.0)
+        titles, pending = _ep_titles(rec, wait=max(0.0, META_BUDGET - (time.monotonic() - t_meta)))
         for v in vids:
             t = titles.get(f"{v['season']}:{v['episode']}")
             if t:
                 v["title"] = v["name"] = t
-        if pending:
+        if pending or not live_done:        # app re-asks soon -> picks up the late data
             meta["ept_pending"] = True
         meta["videos"] = vids
     return meta
