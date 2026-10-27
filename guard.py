@@ -661,6 +661,7 @@ def conc_check(ip, dev="", now=None):
 # ============================================================ Step 6 ====
 # Honeypot (fake anime), bot score, bans.
 BAN_SCORE = _env_num("BAN_SCORE", 90)             # score at which an IP is banned automatically (mode 'on')
+CAPTCHA_SCORE_USER = _env_num("CAPTCHA_SCORE_USER", 85)   # a SIGNED-IN user gets the game only from this bot score
 FLAG_SCORE = _env_num("FLAG_SCORE", 60)           # score from which the admin list calls it "shak"
 BAN_HOURS = _env_num("BAN_HOURS", 24)             # automatic bans end after this (manual bans: never, unless you set hours)
 BEH_SECS = 3600                                   # the score looks at the last hour (counters restart after it)
@@ -1032,6 +1033,16 @@ def set_mode(m):
     return m
 
 
+def forgive(ip, dev=""):
+    """The visitor just passed the game captcha: start his behaviour counters from zero."""
+    try:
+        with _beh_lock:
+            for k in _beh_keys(ip, dev):
+                BEH.pop(k, None)
+    except Exception:
+        pass
+
+
 def score_of(ip, dev=""):
     """Bot % of this IP / device (the higher of the two) -> (0..100, [reasons])."""
     best = (0, [])
@@ -1119,6 +1130,76 @@ def acct_stream(uid, sid, video="", dev="", ip=""):
         return ""
 
 
+# ---- strikes: a visitor who keeps looking like a bot gets the game 3 times, then his speed is cut for SLOW_MIN minutes
+CAP_STRIKES = _env_num("CAP_STRIKES", 3)          # games asked for bot-like watching before the slow-down starts
+SLOW_MIN = _env_num("SLOW_MIN", 30)               # the slow-down lasts this many minutes
+SLOW_BPS = _env_num("SLOW_BPS", 12000)            # bytes/second while slowed (stream AND download)
+STRIKE_WIN = 3600                                 # strikes older than this are forgotten
+_strikes = {}                                     # "i:<ipk>" / "d:<dev>" -> [times]
+_slow = {}                                        # same keys -> slowed until
+_strike_lock = threading.Lock()
+
+
+def _sk(ip, dev):
+    return ["i:" + ip_key(ip)] + (["d:" + dev] if dev else [])
+
+
+def is_slow(ip, dev="", now=None):
+    """True = this visitor's streams and downloads must run at SLOW_BPS."""
+    try:
+        if not _slow or mode() != "on":
+            return False
+        now = now or time.time()
+        with _strike_lock:
+            return any(_slow.get(k, 0) > now for k in _sk(ip, dev))
+    except Exception:
+        return False
+
+
+def bot_strike(ip, dev, why, ask=True, now=None):
+    """Bot-like watching seen (many videos at once / bot score).  -> "ask" (play the game) | "slow" (3 games
+    already used: speed cut for SLOW_MIN min, no more game) | "" (nothing: mode off/log or ask=False and still free)."""
+    try:
+        m = mode()
+        if m == "off":
+            return ""
+        now = now or time.time()
+        if m != "on":
+            captcha_needed(ip, why, dev=dev)      # dry-run: only writes it down
+            return ""
+        keys = _sk(ip, dev)
+        with _strike_lock:
+            if any(_slow.get(k, 0) > now for k in keys):
+                return "slow"
+            n = 0
+            for k in keys:
+                lst = [t for t in _strikes.get(k, []) if t > now - STRIKE_WIN]
+                _strikes[k] = lst
+                n = max(n, len(lst))
+            if n >= CAP_STRIKES:
+                for k in keys:
+                    _slow[k] = now + SLOW_MIN * 60
+                    _strikes.pop(k, None)
+                res = "slow"
+            else:
+                if ask:
+                    for k in keys:
+                        _strikes.setdefault(k, []).append(now)
+                res = "ask" if ask else ""
+            if len(_strikes) > 30000:
+                _strikes.clear()
+            if len(_slow) > 30000:
+                for k in [k for k, t in _slow.items() if t < now]:
+                    del _slow[k]
+        if res == "slow":
+            _log("warn", "SLOW ip=%s %s -> %d min slow-down" % (ip, why, SLOW_MIN), key="slow:" + ip_key(ip), ttl=60)
+        elif res == "ask":
+            captcha_needed(ip, why, dev=dev)
+        return res
+    except Exception:
+        return ""
+
+
 def captcha_needed(ip, why, dev=""):
     """Unusual activity seen (rate limit / bot score).  True = ask the game captcha now (mode 'on').
     Mode 'log' only writes it down (dry-run), mode 'off' does nothing."""
@@ -1128,7 +1209,7 @@ def captcha_needed(ip, why, dev=""):
             return False
         with _viol_lock:
             _viol["captcha_asked"] += 1
-        _beh_add("viol", ip, dev)
+        # (no "viol" point here: asking a game must not raise the bot score, or the same visitor is asked again and again)
         _log("warn", "captcha ip=%s %s -> %s" % (ip, why, "ASK" if m == "on" else "log only (dry-run)"),
              key="capask:" + ip_key(ip), ttl=60)
         return m == "on"

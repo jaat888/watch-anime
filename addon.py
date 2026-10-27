@@ -3276,6 +3276,23 @@ def _rewrite_m3u8(text, base_url, proxy_prefix):
 _HTML_HEADS = (b"<!DO", b"<htm")
 
 
+def _out(handler, chunk):
+    """handler.wfile.write(chunk) - but a visitor in the slow-down (guard.bot_strike) gets SLOW_BPS bytes/second."""
+    try:
+        slow = (not getattr(handler, "_vip", None)) and guard.is_slow(getattr(handler, "_ip", ""), getattr(handler, "_dev", ""))
+    except Exception:
+        slow = False
+    if not slow:
+        handler.wfile.write(chunk)
+        return
+    step = max(1024, int(guard.SLOW_BPS // 8))
+    for i in range(0, len(chunk), step):
+        part = chunk[i:i + step]
+        handler.wfile.write(part)
+        handler.wfile.flush()
+        time.sleep(len(part) / float(guard.SLOW_BPS))
+
+
 def _pump(handler, response, length=None, skip=0):
     """Stream the upstream body to the client, guarding against the
     origin slipping in an HTML page instead of media."""
@@ -3296,7 +3313,7 @@ def _pump(handler, response, length=None, skip=0):
             chunk, skip = chunk[skip:], 0
         if length is not None and written + len(chunk) > length:
             chunk = chunk[:length - written]
-        handler.wfile.write(chunk)
+        _out(handler, chunk)
         written += len(chunk)
         if length is not None and written >= length:
             break
@@ -3649,7 +3666,7 @@ def _wn_pump(handler, resp, need, skip):
             chunk = chunk[take:]
             if not chunk:
                 continue
-        handler.wfile.write(chunk)
+        _out(handler, chunk)
         written += len(chunk)
     return written
 
@@ -3943,12 +3960,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._pass, self._tvn = False, ""
                 if guard.captcha_needed(ip, "TV pass: %d video ho gaye" % captcha.TV_VIDEOS, dev=dev):
                     return self._send({"error": "TV ke liye naya QR scan karo.", "captcha": True, "why": "tv pass khatam"}, 403)
-        # 1b. Step 7: unusual activity (many videos at once / bot score) -> game captcha, unless one was passed lately
-        if not self._pass:
-            why = self._captcha_why(slug, season, episode)
-            if why and guard.captcha_needed(ip, why, dev=dev):
-                return self._send({"error": "Ek chhota game khelo, phir video chalega.", "captcha": True, "why": why}, 403)
-        # 2. guest: max GUEST_MAX different videos, then sign-in
+        # 1b. who is it?  A guest who used up GUEST_MAX videos gets the SIGN-IN message (never a captcha).
         try:
             u = accounts.user_for(self._token())
         except Exception:
@@ -3956,12 +3968,21 @@ class Handler(BaseHTTPRequestHandler):
         if not u and guard.guest_start(ip, dev, "%s:%s:%s" % (slug, season or "", episode or "")):
             return self._send({"error": "Guest ke %d video ho gaye. Aage ke liye sign in karo." % guard.GUEST_MAX,
                                "signin": True}, 401)
+        # 1c. Step 7: unusual activity (many videos at once / bot score) -> game captcha, unless one was passed lately.
+        #     Signed-in users get much looser limits; a guest who opens many videos like a bot still gets the game.
+        if not self._pass:
+            why = self._captcha_why(slug, season, episode, bool(u))
+            if why and guard.bot_strike(ip, dev, why) == "ask":      # 3 games, then "slow" (the video still plays, but slowly)
+                return self._send({"error": "Ek chhota game khelo, phir video chalega.", "captcha": True, "why": why}, 403)
         # 3. at most CONC_MAX streams at the same time from one IP
         if guard.conc_check(ip, dev):                 # (True only when PROTECT=on)
             if not self._pass:                        # Step 7: too many at once -> captcha first, not a plain error
-                return self._send({"error": "Ek chhota game khelo, phir video chalega.", "captcha": True,
-                                   "why": "ek saath %d se zyada video" % guard.CONC_MAX}, 403)
-            if len(guard.live_streams(ip)) >= captcha.CONC_HARD:     # even a proven human has a ceiling
+                if guard.bot_strike(ip, dev, "ek saath %d se zyada video" % guard.CONC_MAX) == "ask":
+                    return self._send({"error": "Ek chhota game khelo, phir video chalega.", "captcha": True,
+                                       "why": "ek saath %d se zyada video" % guard.CONC_MAX}, 403)
+            else:
+                guard.bot_strike(ip, dev, "pass ke baad bhi ek saath zyada video", ask=False)
+            if len(guard.live_streams(ip)) >= captcha.CONC_HARD and not guard.is_slow(ip, dev):     # even a proven human has a ceiling
                 return self._send({"error": "Is IP se %d se zyada video ek saath nahi chal sakte." % captcha.CONC_HARD,
                                    "busy": True}, 429)
         sess = guard.sess_open(ip, dev=dev)
@@ -3975,14 +3996,15 @@ class Handler(BaseHTTPRequestHandler):
                 guard.sess_end(old)
         self._send(api_watch(slug, season, episode, sess))
 
-    def _captcha_why(self, slug, season, episode):
-        """Step 7: is there a reason to ask the game captcha?  -> text, or "" (all normal)."""
+    def _captcha_why(self, slug, season, episode, signed=False):
+        """Step 7: is there a reason to ask the game captcha?  -> text, or "" (all normal).
+        signed = a signed-in user: twice the burst limit and a higher bot score before the game is asked."""
         try:
             n = captcha.burst(self._ip, "%s:%s:%s" % (slug, season or "", episode or ""))
-            if n >= captcha.BURST_MAX:
+            if n >= (captcha.BURST_MAX * 2 if signed else captcha.BURST_MAX):
                 return "%d alag video %d sec me" % (n, captcha.BURST_WIN)
             sc, why = guard.score_of(self._ip, self._dev)
-            if sc >= guard.FLAG_SCORE:
+            if sc >= (guard.CAPTCHA_SCORE_USER if signed else guard.FLAG_SCORE):
                 return "bot score %d%% (%s)" % (sc, "; ".join(why)[:120])
         except Exception:
             pass
@@ -4012,7 +4034,10 @@ class Handler(BaseHTTPRequestHandler):
             if not g:
                 return self._send({"error": "captcha error"}, 500)
             return self._send(g)
-        return self._send(captcha.verify(b.get("id"), ip, b, lab=lab))
+        res = captcha.verify(b.get("id"), ip, b, lab=lab)
+        if res.get("ok") and not lab:
+            guard.forgive(ip, dev)                    # a passed game wipes the bot score: no second game for the same old reason
+        return self._send(res)
 
     def _tv(self, path, b):
         """/api/tv/new | poll | done | check  (Step 9).  The TV shows a QR, a phone plays the game, the TV gets a pass."""

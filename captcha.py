@@ -58,7 +58,7 @@ def _num(key, default, lo, hi, cast=float):
 
 
 TTL = _num("CAPTCHA_TTL", 120, 10, 600, int)               # a captcha lives this long (seconds), one use
-PASS_TTL = _num("CAPTCHA_PASS_MIN", 30, 1, 1440, int) * 60  # pass token life (phone / web)
+PASS_TTL = _num("CAPTCHA_PASS_MIN", 180, 1, 1440, int) * 60  # pass token life (phone / web)
 POW_BITS = _num("CAPTCHA_POW_BITS", 14, 0, 24, int)       # hidden puzzle: leading zero bits (14 = ~16k hashes)
 BURST_MAX = _num("CAPTCHA_BURST", 5, 2, 50, int)          # this many DIFFERENT videos in BURST_WIN s = rate limit seen
 BURST_WIN = 60
@@ -74,7 +74,7 @@ TV_PAIR_TTL = 120                                          # a QR / code works f
 TV_PAIR_OPEN = 6                                           # open QR codes per TV IP at a time (a hostel has many TVs)
 
 _DEFAULT = {
-    "speed": 0.35,       # how fast the balls move (x)  [SLOW: was 1.0]
+    "speed": 0.55,       # how fast the balls move (x)  [a little faster than 0.35, still easy]
     "size": 26.0,        # ball radius (px)  [EASY: was 16]
     "balls": 3,          # how many balls (2-4)  [EASY: was 4]
     "color_ms": 2200,    # a ball changes its colour every this many ms
