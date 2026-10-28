@@ -136,6 +136,8 @@ PL_TTL          = _env_int("PL_TTL", 300)          # HLS playlist cache (VOD)
 
 VERSION  = "3.6.0"
 ADDON_ID = "community.raretoons2"
+ID_PREFIX = "wa2"                       # new public id prefix (website + new installs)
+ID_PREFIXES = ("wa2", "raretoons2")     # raretoons2 kept so old Stremio libraries keep working
 ADDON_NAME = "mollad_jaat"
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 SITE = "https://www.rareanimes.mov/"
@@ -1814,7 +1816,7 @@ def handle_manifest(base):
         # resolve for foreign tt... ids via Cinemeta and for legacy
         # raretoons2: ids.
         "resources": ["stream", "meta"],
-        "idPrefixes": ["raretoons2", "tt"],
+        "idPrefixes": [ID_PREFIX, "raretoons2", "tt"],
         "catalogs": [],
         "behaviorHints": {"configurable": False},
     }
@@ -2073,6 +2075,7 @@ def _live_soft(rec, wait):
 
 def handle_meta(mtype, mid):
     slug = mid.split(":", 1)[1] if ":" in mid else mid
+    _pfx = mid.split(":", 1)[0] if ":" in mid else ID_PREFIX
     rec = SHOWS.get(slug)
     if not rec:
         return None
@@ -2125,8 +2128,8 @@ def handle_meta(mtype, mid):
     info = _show_info(rec, wait=max(0.0, META_BUDGET - (time.monotonic() - t_meta)))
     _pimg = rec["poster"] or None                # the picture: our own short link, so the source site's address is not shown in /meta
     _pbase = _public_base_holder.get("base") or ""
-    if _pimg and _pbase and str(_pimg).startswith("https://"):
-        _pimg = _pbase.rstrip("/") + "/img/s/" + slug
+    if _pimg and str(_pimg).startswith("http"):
+        _pimg = (_pbase.rstrip("/") if _pbase else "") + "/img/s/" + slug   # never leak the source URL, even if base unknown
     meta = {
         "id": mid,
         "type": mtype,
@@ -2153,7 +2156,7 @@ def handle_meta(mtype, mid):
                 seen_se.add((s, e))
                 r0 = rows[0]
                 title = r0.get("ep_title") or f"Episode {e}"
-                vids.append({"id": f"raretoons2:{slug}:{s}:{e}",
+                vids.append({"id": f"{_pfx}:{slug}:{s}:{e}",
                              "season": s, "episode": e,
                              "title": title, "name": title})
         titles, pending = _ep_titles(rec, wait=max(0.0, META_BUDGET - (time.monotonic() - t_meta)))
@@ -2174,8 +2177,8 @@ def handle_stream(mtype, mid):
     continuously, so the crawler snapshot goes stale within hours."""
     season = episode = None
     rec = None
-    if mid.startswith("raretoons2:"):
-        parts = mid[len("raretoons2:"):].split(":")
+    if mid.split(":", 1)[0] in ID_PREFIXES and ":" in mid:
+        parts = mid.split(":", 1)[1].split(":")
         rec = SHOWS.get(parts[0])
         if len(parts) >= 3:
             try:
@@ -3422,7 +3425,7 @@ def api_watch(slug, season, episode, sess=None):
     rec = SHOWS.get(slug)
     if not rec:
         return {"sources": [], "error": "unknown show"}
-    mid = f"raretoons2:{slug}"
+    mid = f"{ID_PREFIX}:{slug}"
     if not rec["movie"] and season is not None:
         mid += f":{int(season)}:{int(episode)}"
     res = handle_stream("movie" if rec["movie"] else "series", mid)
@@ -4846,7 +4849,7 @@ class Handler(BaseHTTPRequestHandler):
                         self._send({"error": "not found"}, 404)
                 return
 
-            m = re.match(r"^/meta/(series|movie)/(raretoons2:.+)\.json$",
+            m = re.match(r"^/meta/(series|movie)/((?:wa2|raretoons2):.+)\.json$",
                          path)
             if m:
                 if not self._vip:
@@ -4863,11 +4866,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             m = re.match(r"^/stream/(series|movie)/"
-                         r"(raretoons2:[^/]+|tt\d+(?::\d+)*)\.json$", path)
+                         r"((?:wa2|raretoons2):[^/]+|tt\d+(?::\d+)*)\.json$", path)
             if m:
                 if not self._vip:
                     sid_ = m.group(2).split(":")
-                    if self._pre("stream", sid_[1] if sid_[0] == "raretoons2" and len(sid_) > 1 else None):
+                    if self._pre("stream", sid_[1] if sid_[0] in ID_PREFIXES and len(sid_) > 1 else None):
                         return
                     if self._limit("stream", 60, guard.STREAM_MIN, 0, "/stream"):     # Stremio: only a rate limit
                         return

@@ -902,7 +902,7 @@ async function watchApi(s,season,episode){const u="/api/watch/"+s.slug+(s.movie?
   for(let tries=0;;tries++){
     try{return await api(u)}
     catch(e){
-      if(e.status===403&&e.open&&tries<2){try{await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json")}catch(_){}continue}
+      if(e.status===403&&e.open&&tries<2){try{await api("/meta/"+(s.movie?"movie":"series")+"/wa2:"+encodeURIComponent(s.slug)+".json")}catch(_){}continue}
       if(e.status===403&&e.captcha&&tries<3){capForget();if(await solveCaptcha())continue;e.cancelled=true}
       throw e}}}
 const go=x=>{location.hash=x};
@@ -1057,7 +1057,7 @@ function epProgSet(slug,season,episode,pos,dur,ended){if(!dur||!isFinite(dur))re
 function epProgAll(slug){const m=epProgGet(slug);PROG.forEach(p=>{if(p.slug===slug&&p.dur){const k=p.season+":"+p.episode,v=Math.min(100,Math.round(p.pos/p.dur*100));if(!(k in m)||m[k]<v)m[k]=v}});return m}
 function setEpBox(b,pct){pct=Math.max(0,Math.min(100,pct||0));const done=pct>=95;b.classList.toggle("done",done);const i=b.querySelector(".epm i"),t=b.querySelector(".epp");if(i)i.style.width=(done?100:pct)+"%";if(t)t.textContent=done?"\u2713 100%":pct>0?pct+"%":""}
 const epTitle=v=>{const t=v&&v.title?String(v.title).trim():"";return t&&!/^(?:episode|ep\.?)\s*\d*$/i.test(t)?t:""};
-async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<(c.p?8000:120000))return c.v;let v=[],pend=false;try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];pend=!!(m.meta&&m.meta.ept_pending);if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie||pend)META[s.slug]={t:Date.now(),v,p:pend};else if(c)return c.v;return v}
+async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<(c.p?8000:120000))return c.v;let v=[],pend=false;try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/wa2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];pend=!!(m.meta&&m.meta.ept_pending);if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie||pend)META[s.slug]={t:Date.now(),v,p:pend};else if(c)return c.v;return v}
 function posterEl(s){const w=h("div",{class:"pw"}),f=()=>h("div",{class:"ph"},(s.name[0]||"?").toUpperCase());if(!s.poster){w.append(f());w.classList.add("ok");return w}
   /* landscape art -> fills the frame. portrait poster -> shown whole over a blurred copy of itself, so faces are never cut off */
   const b=h("div",{class:"bgb",style:bgStyle(s)}),i=h("img",{class:"poster",loading:"lazy",decoding:"async",alt:"",referrerpolicy:"no-referrer",src:s.poster});
@@ -1250,7 +1250,7 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
   {const pc=$app.querySelector('.chips [aria-pressed="true"]');if(pc&&pc.parentNode)pc.parentNode.scrollLeft=pc.offsetLeft-pc.parentNode.clientWidth/2+pc.offsetWidth/2}
   if(ME)api("/api/seen/"+slug).then(r=>r.seen.forEach(k=>{const b=$app.querySelector('[data-k="'+k+'"]');if(b)b.classList.add("seen")})).catch(()=>{});
   const mc=META[slug];if(!s.movie&&mc&&mc.p){let tries=0;const tick=async()=>{if(++tries>(vids.length?5:8)||location.hash.indexOf("#/show/"+slug)!==0)return;
-    try{const m=await api("/meta/series/raretoons2:"+encodeURIComponent(slug)+".json"),vs=(m.meta&&m.meta.videos)||[];
+    try{const m=await api("/meta/series/wa2:"+encodeURIComponent(slug)+".json"),vs=(m.meta&&m.meta.videos)||[];
       vs.forEach(v=>{const t=epTitle(v);if(!t)return;const b=$app.querySelector('.epc[data-k="'+v.season+":"+v.episode+'"] .et');if(b)b.textContent=t});
       if(vs.length)META[slug]={t:Date.now(),v:vs,p:!!(m.meta&&m.meta.ept_pending)};
       if(!vids.length&&vs.length){showPage(slug);return}
