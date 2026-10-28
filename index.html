@@ -716,7 +716,7 @@ html.tv .pskt{font-size:22px}html.tv .pskt button{font-size:22px}html.tv .player
 window.ensureHls=function(){if(window.Hls)return Promise.resolve();if(P)return P;
 P=new Promise(function(res){var sc=document.createElement("script");sc.crossOrigin="anonymous";sc.async=true;
 sc.src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/"+(old?"0.14.17":"1.5.13")+"/hls.min.js";
-sc.onload=sc.onerror=function(){res()};document.head.appendChild(sc);setTimeout(res,12000)});return P}})();
+sc.onload=sc.onerror=function(){res()};document.head.appendChild(sc);setTimeout(res,5000)});return P}})();
 </script>
 <script>
 /* polyfills for old browsers (TV Chrome < 86) */
@@ -755,7 +755,9 @@ function h(tag,a,...kids){const el=document.createElement(tag);for(const[k,v]of 
 async function api(url,body){const o={headers:{"X-Device":DID}},t=store.get("token");if(t)o.headers.Authorization="Bearer "+t;
   const cp=capToken();if(cp)o.headers["X-Captcha"]=cp;
   if(body){o.method="POST";o.headers["Content-Type"]="application/json";o.body=JSON.stringify(body)}
-  const r=await fetch(url,o);let j={};try{j=await r.json()}catch(e){}if(!r.ok){const e=new Error(j.error||r.status);e.status=r.status;e.open=j.open;e.signin=j.signin;e.busy=j.busy;e.captcha=j.captcha;throw e}return j}
+  let tm=0;if(/^\/api\/(login|signup)$/.test(url)){const ct=new AbortController();o.signal=ct.signal;tm=setTimeout(()=>ct.abort(),25000)}   /* a sleeping database must not leave the sign-in spinning for a minute */
+  let r;try{r=await fetch(url,o)}catch(e){if(e&&e.name==="AbortError")throw new Error("The server is slow right now (waking up). Please try again in a moment.");throw e}finally{clearTimeout(tm)}
+  let j={};try{j=await r.json()}catch(e){}if(!r.ok){const e=new Error(j.error||r.status);e.status=r.status;e.open=j.open;e.signin=j.signin;e.busy=j.busy;e.captcha=j.captcha;throw e}return j}
 /* game captcha (Step 8): the server only asks when something looks unusual (403 {captcha:true}).
    The game code (/captcha.js) is loaded only then. A pass token (30 min, tied to the IP) rides along in header X-Captcha. */
 let CAPT="",CAPX=0,CAPP=null;
@@ -918,7 +920,25 @@ let LASTNAV=null;function drawNav(){setTimeout(()=>{if(window.setHH)setHH()},0);
 
 /* ---------- account ---------- */
 let meReady=Promise.resolve();
-async function loadMe(){if(store.get("token")){try{const j=await api("/api/me");ME=j.user;PROG=j.progress;FAVS=j.favs||[]}catch(e){if(e.status===401)store.del("token");ME=null;PROG=[];FAVS=[]}}}
+/* per-user things (account, continue watching, favourites) come from /api/me, separate from the home.
+   They are kept on this phone too: pages open at once with the saved copy and are corrected when the answer arrives. */
+const MEK="me_v1",meSig=()=>JSON.stringify([ME&&ME.id,PROG,FAVS]);
+function meSet(j){ME=j.user;PROG=j.progress||[];FAVS=j.favs||[]}
+function meLocal(){const tk=store.get("token");if(!tk)return;try{const c=JSON.parse(store.get(MEK)||"null");if(c&&c.tk===tk.slice(-10)&&c.j&&c.j.user)meSet(c.j)}catch(e){}}
+function meClear(){ME=null;PROG=[];FAVS=[];store.del(MEK)}
+/* true = loaded, false = server/DB slow (keep what we have), undefined = not signed in */
+async function loadMe(){const tk=store.get("token");if(!tk)return;
+  try{const j=await api("/api/me");meSet(j);if(!j.stale)idle(()=>store.set(MEK,JSON.stringify({tk:tk.slice(-10),j:{user:j.user,progress:j.progress,favs:j.favs}})));return true}
+  catch(e){if(e.status===401){store.del("token");meClear();return true}return false}}
+/* sign out: this phone forgets the account at once; telling the server happens in the background (a sleeping DB must not hold the button) */
+function doLogout(){api("/api/logout",{}).catch(()=>{});store.del("token");meClear()}
+/* saved home/account copies of an older app version are dropped, so a changed format can never break a page */
+const HSCHEMA="3";
+function cacheSchema(){if(store.get("hs_schema")===HSCHEMA)return;SLOTS.forEach(k=>store.del("hs_"+k));store.del(MEK);store.del("shows_v1");store.set("hs_schema",HSCHEMA);try{document.cookie="hc=; max-age=0; path=/"}catch(e){}}
+function meChanged(){const p=location.hash.replace(/^#\/?/,"").split("/")[0];if(!SHOWS||p==="watch")return;if(!p)onSlot();else route()}
+async function meRetry(n){if(n>5||!store.get("token"))return;await new Promise(r=>setTimeout(r,6000));const s0=meSig(),ok=await loadMe();if(ok===false)return meRetry(n+1);if(meSig()!==s0)meChanged()}
+/* a page never waits long for the account: the saved copy is used, at most ~1.5 s for a phone that has none */
+const meWait=ms=>ME||!store.get("token")?Promise.resolve():Promise.race([meReady,new Promise(r=>setTimeout(r,ms))]);
 let LOCKS=0;function lockScroll(){if(!LOCKS++)document.documentElement.classList.add("lock")}
 function unlockScroll(){if(LOCKS>0&&!--LOCKS)document.documentElement.classList.remove("lock")}
 function modal(...kids){const m=h("div",{class:"modal",onclick:e=>{if(e.target===m)m.remove()}},h("div",{class:"box"},...kids));const rm=m.remove.bind(m);let done=false;m.remove=()=>{rm();if(!done){done=true;unlockScroll()}};lockScroll();document.body.append(m);return m}
@@ -926,11 +946,12 @@ function authModal(){let mode="login";
   const u=h("input",{class:"in",placeholder:"Username",autocomplete:"username"}),p=h("input",{class:"in",type:"password",placeholder:"Password",autocomplete:"current-password"}),err=h("div",{class:"err"});
   const title=h("b",{style:"font-size:18px"},"Sign in"),sw=h("button",{class:"back",style:"margin:0"},"New here? Create an account"),ok=h("button",{class:"pri"},"Sign in");
   const m=modal(title,u,p,err,ok,sw);
-  sw.onclick=()=>{mode=mode==="login"?"signup":"login";title.textContent=ok.textContent=mode==="login"?"Sign in":"Create account";sw.textContent=mode==="login"?"New here? Create an account":"Have an account? Sign in"};
-  ok.onclick=async()=>{err.textContent="";try{
+  sw.onclick=()=>{mode=mode==="login"?"signup":"login";p.autocomplete=mode==="login"?"current-password":"new-password";err.textContent="";title.textContent=ok.textContent=mode==="login"?"Sign in":"Create account";sw.textContent=mode==="login"?"New here? Create an account":"Have an account? Sign in"};
+  ok.onclick=async()=>{if(ok.disabled)return;err.textContent="";ok.disabled=true;try{
     if(mode==="signup"&&onTV()&&!capToken()&&!await solveCaptcha()){err.textContent="Creating an account on a TV needs the phone check (QR).";return}   /* Step 9: signup on TV = QR every time there is no pass */
     let j;for(let t=0;;t++){try{j=await api("/api/"+mode,{username:u.value.trim(),password:p.value});break}catch(e){if(e.status===403&&e.captcha&&t<2){capForget();if(await solveCaptcha())continue;throw new Error(onTV()?"Scan the QR with your phone to continue.":"Please finish the quick game to continue.")}throw e}}
-    store.set("token",j.token);m.remove();await loadMe();route()}catch(e){err.textContent=e.message}};
+    store.set("token",j.token);meClear();if(j.user)meSet({user:j.user,progress:[],favs:[]});   /* signed in at once with what the server just said; progress/favourites follow from /api/me */
+    m.remove();meSig0=meSig();route();const ok2=await loadMe();if(ok2===false)meRetry(1);else if(meSig()!==meSig0)meChanged()}catch(e){err.textContent=e.message||"Could not sign in. Please try again."}finally{ok.disabled=false}};
   p.onkeydown=e=>{if(e.key==="Enter")ok.click()};u.focus()}
 function accountModal(){
   const o=h("input",{class:"in",type:"password",placeholder:"Current password",autocomplete:"current-password"}),n=h("input",{class:"in",type:"password",placeholder:"New password (min 6)",autocomplete:"new-password"}),msg=h("div",{class:"err"});
@@ -939,32 +960,84 @@ function accountModal(){
   const inst=h("button",{class:"btn"},"Install app");
   inst.onclick=async()=>{if(installEvt){installEvt.prompt();installEvt=null}else alert("To install: open your browser menu and choose “Add to Home screen” (on iPhone: Share → Add to Home Screen).")};
   const m=modal(h("b",{style:"font-size:18px"},ME.username),o,n,msg,save,inst,
-    h("button",{class:"btn",onclick:async()=>{try{await api("/api/logout",{})}catch(e){}store.del("token");ME=null;PROG=[];FAVS=[];m.remove();go("#/");route()}},"Sign out"))}
+    h("button",{class:"btn",onclick:()=>{doLogout();m.remove();go("#/");route()}},"Sign out"))}
 /* ---------- data ---------- */
 const skCard=()=>h("div",{class:"card sk-card"},h("div",{class:"pw sk"}),h("div",{class:"t"},h("div",{class:"sk sk-l"}),h("div",{class:"sk sk-l s"})));
 const skRail=()=>[h("h2",{class:"sec"},h("span",{class:"sk sk-h"})),h("div",{class:"rail"},[1,2,3,4,5].map(skCard))];
 const skHome=()=>[h("div",{class:"hero sk","aria-busy":"true"}),...skRail(),...skRail()];
 const skShow=()=>[h("div",{class:"back"},"\u00a0"),h("div",{class:"hero sk",style:"min-height:230px"}),h("h2",{class:"sec"},h("span",{class:"sk sk-h"})),h("div",{class:"eps"},Array.from({length:14},()=>h("div",{class:"ep sk"})))];
-const setLists=j=>{TRENDM=j.trending_movies||[];TOPR=j.top_rated||[];TOPM=j.top_movies||[];RECS=j.recent||[];RECM=j.recent_movies||[]};
-let sig="";const mkSig=j=>(j.shows||[]).length+"|"+(j.trending||[]).slice(0,30).join(",")+"|"+(j.trending_movies||[]).slice(0,15).join(",")+"|"+(j.top_rated||[]).slice(0,15).join(",")+"|"+(j.recent||[]).slice(0,15).join(",")+"|"+(j.shows||[]).reduce((a,x)=>a+(x.upd||0)%1000+(x.n||0),0)+"|"+(j.shows||[]).reduce((a,x)=>(a*31+(x.le?x.le[0]*1000+x.le[1]:0))%1000000007,7);
-const SHOWS_FRESH=600000;   /* a saved list is shown at once only if it is younger than this (10 min); older = ask the server first */
-const saveShows=j=>{try{j._t=Date.now();const t=JSON.stringify(j);if(t.length<4500000)store.set("shows_v1",t)}catch(e){}};
-async function loadShows(){if(SHOWS)return;
-  /* the server inlines the list into this very page: render on first paint, no second request */
-  if(window.__BOOT__&&window.__BOOT__.shows){const j=window.__BOOT__;window.__BOOT__=null;SHOWS=real(j.shows);NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);sig=mkSig(j);
-    (window.requestIdleCallback||setTimeout)(()=>saveShows(j));setTimeout(refreshShows,500);return}
-  /* instant paint from the last saved list, fresh data arrives silently right after */
-  let c=null;try{c=JSON.parse(store.get("shows_v1")||"null")}catch(e){}
-  if(c&&c.shows&&c.shows.length&&c._t&&Date.now()-c._t<SHOWS_FRESH){SHOWS=real(c.shows);NOW=Date.now()/1e3;POP=c.popular||[];TREND=c.trending||POP;TRENDD=c.trending_day||[];setLists(c);sig=mkSig(c);setTimeout(refreshShows,300);return}
-  $app.replaceChildren(...skHome());const j=await api("/api/shows");SHOWS=real(j.shows);NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);sig=mkSig(j);saveShows(j)}
-let lastSync=Date.now();
-let rsFail=0;
+/* ---------- home in slots (cards / trending / top / recent) ----------
+   The server cuts the home into sections, each with its own version number (and every card has one too).
+   Every section is cached on this phone on its own: what arrived is shown, what did not shows a skeleton,
+   so a slow network still gives a usable page.  A tiny check (/api/home/v, every 30-60 s) tells what changed;
+   only that part is downloaded and put in place - no reload.  Per-user things (continue, favourites) come from /api/me. */
+const SLOTS=["cards","trending","top","recent"],HV={},READY={cards:0,trending:0,top:0,recent:0};
+const slotSave=(k,j)=>{store.set("hs_"+k,JSON.stringify(j));
+  /* cookie hc=1 = "this phone holds the home": the server then sends the small page without the list inside */
+  if(k==="cards"){try{if(store.get("hs_cards"))document.cookie="hc=1; max-age=31536000; path=/; SameSite=Lax";else document.cookie="hc=; max-age=0; path=/"}catch(e){}}};
+const slotRead=k=>{try{const j=JSON.parse(store.get("hs_"+k)||"null");return j&&j.v?j:null}catch(e){return null}};
+const idle=f=>(window.requestIdleCallback||setTimeout)(f);
+function applySlot(k,j){
+  if(k==="cards"){SHOWS=real(j.shows);SMAP=null;FR=null}
+  else if(k==="trending"){POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];TRENDM=j.trending_movies||[]}
+  else if(k==="top"){TOPR=j.top_rated||[];TOPM=j.top_movies||[]}
+  else if(k==="recent"){RECS=j.recent||[];RECM=j.recent_movies||[]}
+  HV[k]=j.v;READY[k]=1}
+/* the old all-in-one payload (inlined in the page) -> the four slots */
+function slotsOf(j){const v=j.vers||{};return{
+  cards:{v:v.cards,shows:j.shows},
+  trending:{v:v.trending,popular:j.popular,trending:j.trending,trending_day:j.trending_day,trending_movies:j.trending_movies},
+  top:{v:v.top,top_rated:j.top_rated,top_movies:j.top_movies},
+  recent:{v:v.recent,recent:j.recent,recent_movies:j.recent_movies}}}
+const slotFetch=async k=>{const j=await api("/api/home/s/"+k);applySlot(k,j);idle(()=>slotSave(k,j));return j};
+let lastSync=Date.now(),rsFail=0,syncBusy=0,pollOn=0;
 function srvBanner(on){let b=document.getElementById("srvdown");if(!on){if(b)b.remove();return}if(b)return;b=document.createElement("div");b.id="srvdown";b.setAttribute("role","alert");b.style.cssText="position:fixed;left:0;right:0;top:0;z-index:99999;padding:8px 12px;text-align:center;font-size:13px;background:#b3261e;color:#fff";b.textContent="Server is not answering right now (down or asleep). Videos will not play until it is back.";document.body.append(b)}
-async function refreshShows(){if(!SHOWS)return;try{const j=await api("/api/shows");rsFail=0;srvBanner(false);SHOWS=real(j.shows);NOW=j.now||Date.now()/1e3;POP=j.popular||[];TREND=j.trending||POP;TRENDD=j.trending_day||[];setLists(j);SMAP=null;lastSync=Date.now();saveShows(j);const s2=mkSig(j),changed=s2!==sig;sig=s2;
-  const onHome=!location.hash.replace(/^#\/?/,"");if(changed&&onHome&&!document.querySelector(".modal")&&!document.activeElement?.matches?.("input,textarea")){const y=scrollY;home();scrollTo(0,y)}}catch(e){rsFail++;if(rsFail>=2&&!e.status)srvBanner(true);if(rsFail<=8)setTimeout(refreshShows,Math.min(60000,2500*2**rsFail))}}
-setInterval(()=>{if(!document.hidden)refreshShows()},3600000);
-document.addEventListener("visibilitychange",()=>{if(!document.hidden&&Date.now()-lastSync>300000)refreshShows()});
-addEventListener("online",()=>{rsFail=0;refreshShows()});
+/* redraw Home when something that shapes it changed (not while a dialog or the search box is in use) */
+function onSlot(){const onHome=!location.hash.replace(/^#\/?/,"");if(onHome&&SHOWS&&!document.querySelector(".modal")&&!document.activeElement?.matches?.("input,textarea")){const y=scrollY;home();scrollTo(0,y)}}
+/* only the cards whose own version changed are rebuilt, in place */
+function patchCards(list){for(const it of list)document.querySelectorAll('[data-slug="'+it.slug+'"]').forEach(el=>{if(el._mk){const n=el._mk();if(n)el.replaceWith(n)}})}
+const J=x=>JSON.stringify(x||null);
+async function syncCards(ver){
+  if(!READY.cards){await slotFetch("cards");return"redraw"}
+  const m=(await api("/api/home/vmap")).m||{},have=new Map(SHOWS.map(x=>[x.slug,x])),need=[],gone=[];
+  for(const sl in m){const o=have.get(sl);if(!o||o.v!==m[sl])need.push(sl)}
+  for(const sl of have.keys())if(!(sl in m))gone.push(sl);
+  if(!need.length&&!gone.length){HV.cards=ver;return null}
+  if(need.length>80){await slotFetch("cards");return"redraw"}
+  const got=[];for(let i=0;i<need.length;i+=60)got.push(...real((await api("/api/home/items?s="+need.slice(i,i+60).join(","))).items));
+  let structural=gone.length>0;
+  for(const it of got){const o=have.get(it.slug);if(!o||o.upd!==it.upd||o.add!==it.add||o.movie!==it.movie||o.poster!==it.poster||J(o.langs)!==J(it.langs)||J(o.genres)!==J(it.genres)){structural=true;break}}
+  gone.forEach(s=>have.delete(s));got.forEach(it=>have.set(it.slug,it));
+  SHOWS=[...have.values()].sort((a,b)=>{const x=a.name.toLowerCase(),y=b.name.toLowerCase();return x<y?-1:x>y?1:(a.ord||0)-(b.ord||0)});
+  SMAP=null;FR=null;HV.cards=ver;idle(()=>slotSave("cards",{v:ver,shows:SHOWS}));
+  return structural?"redraw":got}
+async function syncHome(){if(syncBusy||!SHOWS)return;syncBusy=1;
+  try{const r=await api("/api/home/v");rsFail=0;srvBanner(false);lastSync=Date.now();if(r.now)NOW=r.now;
+    const v=r.v||{};let redraw=false,patch=[];
+    for(const k of SLOTS){if(v[k]&&(!READY[k]||v[k]!==HV[k])){
+      if(k==="cards"){const res=await syncCards(v.cards);if(res==="redraw")redraw=true;else if(res)patch.push(...res)}
+      else{await slotFetch(k);redraw=true}}}
+    if(redraw)onSlot();else if(patch.length)patchCards(patch)}
+  catch(e){rsFail++;if(rsFail>=2&&!e.status)srvBanner(true)}
+  finally{syncBusy=0}}
+function startHomeSync(){if(pollOn)return;pollOn=1;
+  (function tick(){setTimeout(()=>{if(!document.hidden)syncHome();tick()},30000+Math.random()*30000)})();
+  document.addEventListener("visibilitychange",()=>{if(!document.hidden&&Date.now()-lastSync>30000)syncHome()});
+  addEventListener("online",()=>{rsFail=0;syncHome()})}
+async function loadShows(){if(SHOWS)return;
+  /* the server inlines the whole home into this very page: render on first paint, no second request */
+  if(window.__BOOT__&&window.__BOOT__.shows){const j=window.__BOOT__;window.__BOOT__=null;const sl=slotsOf(j);
+    for(const k of SLOTS)if(sl[k].v)applySlot(k,sl[k]);else if(k==="cards")applySlot(k,{v:"-",shows:j.shows});
+    NOW=j.now||Date.now()/1e3;idle(()=>SLOTS.forEach(k=>READY[k]&&slotSave(k,sl[k])));startHomeSync();setTimeout(syncHome,1500);return}
+  store.del("shows_v1");   /* the old all-in-one copy is gone: free the space */
+  /* instant paint from what this phone saved, slot by slot */
+  for(const k of SLOTS){const c=slotRead(k);if(c)applySlot(k,c)}
+  NOW=Date.now()/1e3;startHomeSync();
+  if(READY.cards){setTimeout(syncHome,300);return}      /* missing slots show skeletons and fill in as they arrive */
+  $app.replaceChildren(...skHome());
+  const ps={};SLOTS.forEach(k=>{if(!READY[k])ps[k]=slotFetch(k).catch(e=>{if(k==="cards")throw e})});
+  await ps.cards;   /* the cards are needed to look up every slug; the other sections fill in when they come */
+  SLOTS.forEach(k=>{if(k!=="cards"&&ps[k])ps[k].then(()=>READY[k]&&onSlot())})}
 let SMAP=null;const bySlug=s=>{if(!SHOWS)return undefined;if(!SMAP||SMAP.size!==SHOWS.length)SMAP=new Map(SHOWS.map(x=>[x.slug,x]));return SMAP.get(s)};
 const isNew=s=>s.upd&&NOW-s.upd<7*86400;
 /* title shown to the user: AniList English title when the site name is romaji */
@@ -979,7 +1052,7 @@ function epProgSet(slug,season,episode,pos,dur,ended){if(!dur||!isFinite(dur))re
 function epProgAll(slug){const m=epProgGet(slug);PROG.forEach(p=>{if(p.slug===slug&&p.dur){const k=p.season+":"+p.episode,v=Math.min(100,Math.round(p.pos/p.dur*100));if(!(k in m)||m[k]<v)m[k]=v}});return m}
 function setEpBox(b,pct){pct=Math.max(0,Math.min(100,pct||0));const done=pct>=95;b.classList.toggle("done",done);const i=b.querySelector(".epm i"),t=b.querySelector(".epp");if(i)i.style.width=(done?100:pct)+"%";if(t)t.textContent=done?"\u2713 100%":pct>0?pct+"%":""}
 const epTitle=v=>{const t=v&&v.title?String(v.title).trim():"";return t&&!/^(?:episode|ep\.?)\s*\d*$/i.test(t)?t:""};
-async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<(c.p?8000:120000))return c.v;let v=[],pend=false;try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];pend=!!(m.meta&&m.meta.ept_pending);if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie)META[s.slug]={t:Date.now(),v,p:pend};else if(c)return c.v;return v}
+async function getVids(s){const c=META[s.slug];if(c&&Date.now()-c.t<(c.p?8000:120000))return c.v;let v=[],pend=false;try{const m=await api("/meta/"+(s.movie?"movie":"series")+"/raretoons2:"+encodeURIComponent(s.slug)+".json");v=(m.meta&&m.meta.videos)||[];pend=!!(m.meta&&m.meta.ept_pending);if(m.meta)INFO[s.slug]={d:m.meta.overview||"",g:m.meta.genres||[]}}catch(e){}if(v.length||s.movie||pend)META[s.slug]={t:Date.now(),v,p:pend};else if(c)return c.v;return v}
 function posterEl(s){const w=h("div",{class:"pw"}),f=()=>h("div",{class:"ph"},(s.name[0]||"?").toUpperCase());if(!s.poster){w.append(f());w.classList.add("ok");return w}
   /* landscape art -> fills the frame. portrait poster -> shown whole over a blurred copy of itself, so faces are never cut off */
   const b=h("div",{class:"bgb",style:bgStyle(s)}),i=h("img",{class:"poster",loading:"lazy",decoding:"async",alt:"",referrerpolicy:"no-referrer",src:s.poster});
@@ -988,7 +1061,8 @@ function posterEl(s){const w=h("div",{class:"pw"}),f=()=>h("div",{class:"ph"},(s
 const ovEl=s=>{const L=s.langs||[],a=L.length?L[0]+(L.length>1?" +"+(L.length-1):""):"",n=s.movie?"Movie":(s.n?s.n+" ep":"");
   return a||n?h("div",{class:"ov"},a?h("span",{class:"lg"},a):null,n?h("span",{class:"en"},n):null):null};
 const thumb=s=>{const w=posterEl(s),o=ovEl(s);if(o)w.append(o);return w};
-function card(s,pct,onclick,left){const mem=!onclick&&pct==null&&SHOWS?frMap()[frKey(s)]:null,g=mem&&seasonsN(mem)>1;return h("button",{class:"card","data-slug":s.slug,onclick:g?()=>seasonPicker(baseName(s.name)||s.name,mem):(onclick||(()=>go("#/show/"+s.slug)))},thumb(s),s.rating?h("div",{class:"rt"},"★ "+(+s.rating).toFixed(1)):null,g?h("div",{class:"badge"},mem.length+" SEASONS"):isNew(s)&&pct==null?h("div",{class:"badge"},"NEW"):null,pct!=null?h("div",{class:"prog"},h("i",{style:"width:"+pct+"%"})):null,h("div",{class:"t"},h("b",{},g?(baseName(s.name)||nm(s)):nm(s)),h("small",{class:left?"lf":""},left?left:g?mem.length+" seasons \u00b7 "+subOf(s):subOf(s))))}
+function card(s,pct,onclick,left){const el=card0(s,pct,onclick,left);el._mk=()=>card(bySlug(s.slug)||s,pct,onclick,left);return el}
+function card0(s,pct,onclick,left){const mem=!onclick&&pct==null&&SHOWS?frMap()[frKey(s)]:null,g=mem&&seasonsN(mem)>1;return h("button",{class:"card","data-slug":s.slug,onclick:g?()=>seasonPicker(baseName(s.name)||s.name,mem):(onclick||(()=>go("#/show/"+s.slug)))},thumb(s),s.rating?h("div",{class:"rt"},"★ "+(+s.rating).toFixed(1)):null,g?h("div",{class:"badge"},mem.length+" SEASONS"):isNew(s)&&pct==null?h("div",{class:"badge"},"NEW"):null,pct!=null?h("div",{class:"prog"},h("i",{style:"width:"+pct+"%"})):null,h("div",{class:"t"},h("b",{},g?(baseName(s.name)||nm(s)):nm(s)),h("small",{class:left?"lf":""},left?left:g?mem.length+" seasons \u00b7 "+subOf(s):subOf(s))))}
 /* ---------- one card per anime: all its seasons grouped ---------- */
 const LANGW=/\s*[-\u2013]?\s*(hindi|tamil|telugu|malayalam|bengali|multi|dubbed|subbed|dub|sub|uncut|crunchyroll|jio\s*cinema)\b.*$/i;
 function baseName(n){n=String(n||"").replace(/\([^)]*\)/g," ").replace(LANGW,"").replace(/\bseason\s*\d+\b/ig," ").replace(/\bepisodes\b/ig," ");return n.replace(/\s+/g," ").replace(/^[\s\-\u2013]+|[\s\-\u2013]+$/g,"")}
@@ -1014,7 +1088,8 @@ function seasonPicker(base,mem){
 const subOf=s=>((s.langs||[]).length?s.langs.slice(0,2).join(" · ")+" Dub":"Anime")+(s.movie?" · Movie":"");
 const ago=t=>{const d=Math.max(0,NOW-t);return d<3600?Math.max(1,Math.round(d/60))+"m ago":d<86400?Math.round(d/3600)+"h ago":Math.round(d/86400)+"d ago"};
 const epLink=s=>s.le?"#/watch/"+s.slug+"/"+s.le[0]+"/"+s.le[1]:"#/show/"+s.slug;
-function epCard(s){const nw=isNew(s);return h("button",{class:"card",onclick:()=>go(epLink(s))},thumb(s),nw?h("div",{class:"badge"},"NEW"):null,
+function epCard(s){const el=epCard0(s);el.dataset.slug=s.slug;el._mk=()=>epCard(bySlug(s.slug)||s);return el}
+function epCard0(s){const nw=isNew(s);return h("button",{class:"card",onclick:()=>go(epLink(s))},thumb(s),nw?h("div",{class:"badge"},"NEW"):null,
   s.le?h("div",{class:"t"},h("div",{class:"ept"},"S"+s.le[0]+" · E"+s.le[1],nw?h("span",{}," · "+ago(s.upd)):null),h("b",{},dn(s))):h("div",{class:"t"},h("b",{},dn(s)),h("small",{},subOf(s))))}
 const resumeLink=(s,p)=>"#/watch/"+s.slug+(s.movie?"":"/"+p.season+"/"+p.episode);
 const bgStyle=s=>s.poster?"background-image:url('"+s.poster.replace(/'/g,"%27")+"')":"";
@@ -1080,7 +1155,7 @@ function heroEl(items){
   box.addEventListener("touchend",e=>{if(N<2)return;const t=e.changedTouches[0],dx=t.clientX-sx,dy=t.clientY-sy;if(Math.abs(dx)>45&&Math.abs(dx)>Math.abs(dy)*1.5)to(i+(dx<0?1:-1))},{passive:true});
   draw();return box}
 const A=s=>s.kind!=="cartoon";
-function home(){killPlayer();if(SHOWS&&Date.now()-lastSync>45000)setTimeout(refreshShows,0);   /* opening Home always checks for news (server answers from memory, cheap) */
+function home(){killPlayer();if(SHOWS&&Date.now()-lastSync>30000)setTimeout(syncHome,0);   /* opening Home always checks for news (server answers from memory, cheap) */
   const term=$q.value.trim().toLowerCase(),browsing=term||filter!=="all"||lang!=="all"||genre!=="all";
   const langs=[...new Set(SHOWS.flatMap(s=>s.langs||[]))].sort();
   const genres=[...new Set(SHOWS.flatMap(s=>s.genres||[]))].sort();
@@ -1104,20 +1179,21 @@ function home(){killPlayer();if(SHOWS&&Date.now()-lastSync>45000)setTimeout(refr
     if(trend.length<30){const have=new Set(trend.map(s=>s.slug));trend=trend.concat(SHOWS.filter(s=>A(s)&&!s.movie&&s.poster&&!have.has(s.slug)).sort((a,b)=>(b.rating||0)-(a.rating||0)||b.ord-a.ord).slice(0,30-trend.length))}
     const trendP=trend.filter(s=>s.poster);
     const c0=cont[0],heroItems=[...(c0?[c0]:[]),...(trendP.length>=3?trendP:latest.filter(s=>s.poster)).filter(s=>!c0||s.slug!==c0.s.slug).slice(0,LITE?4:6).map(s=>({s}))];
-    if(heroItems.length)kids.push(heroEl(heroItems));
+    if(!READY.trending)kids.push(h("div",{class:"hero sk","aria-busy":"true"}));else if(heroItems.length)kids.push(heroEl(heroItems));
     if(ME)kids.push(...rail("▶ Continue watching",cont.slice(0,15),null,({p,s})=>card(s,p.dur?Math.min(100,p.pos/p.dur*100):0,()=>go(resumeLink(s,p).slice(1)),leftTxt(p,s))));
+    if(!READY.trending)kids.push(...skRail());else{
     if(trendP.length>=5)kids.push(...top10("🔟 Top 10 this week",trendP));
-    if(trend.length>=4)kids.push(...rail("🚀 Trending this week",trend.slice(0,LITE?40:80)));
+    if(trend.length>=4)kids.push(...rail("🚀 Trending this week",trend.slice(0,LITE?40:80)))}
     kids.push(...gTiles);
     const trendM=dedupe(TRENDM.map(bySlug).filter(s=>s&&s.movie&&s.poster));
-    if(trendM.length>=4)kids.push(...rail("🎬 Trending movies",trendM.slice(0,LITE?20:40),()=>{filter="movie";lang="all";shown=60;home()}));
+    if(!READY.trending)kids.push(...skRail());else if(trendM.length>=4)kids.push(...rail("🎬 Trending movies",trendM.slice(0,LITE?20:40),()=>{filter="movie";lang="all";shown=60;home()}));
     const gcnt={};SHOWS.forEach(x=>{if(A(x)&&x.poster)(x.genres||[]).forEach(g=>{gcnt[g]=(gcnt[g]||0)+1})});
     const topG=Object.keys(gcnt).filter(g=>gcnt[g]>=3).sort((a,b)=>gcnt[b]-gcnt[a]).slice(0,8);
     kids.push(...rail("🔥 Latest episodes",fresh.slice(0,20),null,epCard));
-    kids.push(...rail("👀 Recently added",recent.slice(0,LITE?20:40)));
+    if(!READY.recent)kids.push(...skRail());else kids.push(...rail("👀 Recently added",recent.slice(0,LITE?20:40)));
     let top=dedupe(mapS(TOPR).filter(s=>!s.movie&&A(s)));
     if(top.length<30)top=dedupe(SHOWS.filter(s=>!s.movie&&A(s)&&s.poster&&s.rating>=6.5).sort((a,b)=>b.rating-a.rating||(b.n||0)-(a.n||0)));
-    top=top.slice(0,LITE?30:55);if(top.length>=4)kids.push(...rail("🏆 Top rated",top));
+    top=top.slice(0,LITE?30:55);if(!READY.top)kids.push(...skRail());else if(top.length>=4)kids.push(...rail("🏆 Top rated",top));
     for(const L of ["Hindi"]){const l=SHOWS.filter(s=>(s.langs||[]).includes(L)&&!s.movie&&A(s)&&s.poster).sort((a,b)=>b.upd-a.upd||a.name.localeCompare(b.name)).slice(0,20);
       kids.push(...rail("🎌 "+L+" anime",l,()=>{lang=L;filter="anime";shown=60;home()}))}
   }
@@ -1144,7 +1220,7 @@ function listPage(){killPlayer();
 const seasonBase=n=>(n||"").replace(/\s*[-:(]?\s*(?:season|part)\s*\d+\b.*$/i,"").trim().toLowerCase();
 async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go("#/");
   $app.replaceChildren(...skShow());
-  await meReady;const vids=await getVids(s);
+  if(!LITE)idle(()=>window.ensureHls&&ensureHls());await meWait(1500);const vids=await getVids(s);
   const last=PROG.find(p=>p.slug===slug);
   const base=seasonBase(s.name);
   const sibs=base.length>2?SHOWS.filter(x=>x.slug!==slug&&seasonBase(x.name)===base).sort((a,b)=>a.name.localeCompare(b.name)):[];
@@ -1163,15 +1239,16 @@ async function showPage(slug){killPlayer();const s=bySlug(slug);if(!s)return go(
   if(mem.length>1)kids.push(h("div",{class:"lbl",style:"margin-top:18px"},seasonsN(mem)>1?"Seasons":"Versions"),h("div",{class:"chips"},mem.map((x,k)=>h("button",{class:"chip","aria-pressed":String(x.slug===slug),onclick:()=>{if(x.slug!==slug)go("#/show/"+x.slug)}},seasonLabel(x,k,mem)))));
   if(!s.movie){const pp=epProgAll(slug),se={};vids.forEach(v=>(se[v.season]=se[v.season]||[]).push(v));
     for(const n of Object.keys(se).sort((a,b)=>a-b))kids.push(h("h2",{class:"sec"},"Season "+n),h("div",{class:"eps epl"},se[n].map(v=>h("button",{"data-k":v.season+":"+v.episode,class:"ep epc"+(last&&last.season==v.season&&last.episode==v.episode?" cur":""),title:v.title||"",onclick:()=>go("#/watch/"+slug+"/"+v.season+"/"+v.episode)},h("span",{class:"en"},String(v.episode)),h("span",{class:"ec"},h("span",{class:"et"},epTitle(v)||"Episode "+v.episode),h("span",{class:"es"},"Season "+v.season+" \u00b7 Episode "+v.episode+(pp[v.season+":"+v.episode]>=95?" \u00b7 \u2713 Watched":pp[v.season+":"+v.episode]>0?" \u00b7 "+pp[v.season+":"+v.episode]+"% watched":""))),h("span",{class:"eg"},"\u25B6"),pp[v.season+":"+v.episode]>0?h("i",{class:"epbar",style:"width:"+Math.min(100,pp[v.season+":"+v.episode])+"%"}):null))));
-    if(!vids.length)kids.push(h("p",{class:"muted"},"No episodes found."))}
+    if(!vids.length)kids.push(h("p",{class:"muted"},(META[slug]&&META[slug].p)?"Episodes load ho rahe hain...":"No episodes found."))}
   kids.push(...rail("More like this",similar(s,20)));
   $app.replaceChildren(...kids);
   {const pc=$app.querySelector('.chips [aria-pressed="true"]');if(pc&&pc.parentNode)pc.parentNode.scrollLeft=pc.offsetLeft-pc.parentNode.clientWidth/2+pc.offsetWidth/2}
   if(ME)api("/api/seen/"+slug).then(r=>r.seen.forEach(k=>{const b=$app.querySelector('[data-k="'+k+'"]');if(b)b.classList.add("seen")})).catch(()=>{});
-  const mc=META[slug];if(!s.movie&&mc&&mc.p){let tries=0;const tick=async()=>{if(++tries>5||location.hash.indexOf("#/show/"+slug)!==0)return;
+  const mc=META[slug];if(!s.movie&&mc&&mc.p){let tries=0;const tick=async()=>{if(++tries>(vids.length?5:8)||location.hash.indexOf("#/show/"+slug)!==0)return;
     try{const m=await api("/meta/series/raretoons2:"+encodeURIComponent(slug)+".json"),vs=(m.meta&&m.meta.videos)||[];
       vs.forEach(v=>{const t=epTitle(v);if(!t)return;const b=$app.querySelector('.epc[data-k="'+v.season+":"+v.episode+'"] .et');if(b)b.textContent=t});
       if(vs.length)META[slug]={t:Date.now(),v:vs,p:!!(m.meta&&m.meta.ept_pending)};
+      if(!vids.length&&vs.length){showPage(slug);return}
       if(!(m.meta&&m.meta.ept_pending))return}catch(e){}
     setTimeout(tick,2500)};setTimeout(tick,1500)}}
 
@@ -1233,7 +1310,7 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
   if(!alive())return;
   const src=data.sources||[];if(!src.length){msg.textContent="No playable stream is available for this title yet.";return}
   const pref=store.get("lang");let cur=src.findIndex(x=>x.lang===pref&&x.kind==="mq");if(cur<0)cur=src.findIndex(x=>x.kind==="mq");if(cur<0)cur=0;
-  await meReady;if(!alive())return;
+  await meWait(1500);if(!alive())return;
   const saved=PROG.find(p=>p.slug===slug&&(s.movie||(p.season==season&&p.episode==episode)));let resume=saved&&saved.pos>10&&saved.dur-saved.pos>30?saved.pos:0,qSel=-1;
   let markT=0;
   function mark(ended){if(!video.duration||!isFinite(video.duration))return;const k=(+season||0)+":"+(+episode||0),pct=epProgSet(slug,+season||0,+episode||0,ended?video.duration:video.currentTime,video.duration,ended);if(!alive())return;const bx=epBox.querySelector('[data-k="'+k+'"]');if(bx)setEpBox(bx,pct)}
@@ -1464,7 +1541,7 @@ function accountPage(){killPlayer();
       row("Skip ending",skSel("sk_o","Skip ending")),
       row("Preferred language",lsel)),
     h("div",{class:"acbox"},ME?h("button",{class:"acli acact",onclick:accountModal},h("span",{},"Change password"),h("span",{},"\u203a")):null,h("button",{class:"acli acact",onclick:inst},h("span",{},"Install app"),h("span",{},"\u203a")))];
-  if(ME)kids.push(h("button",{class:"btn acout",onclick:async()=>{try{await api("/api/logout",{})}catch(e){}store.del("token");ME=null;PROG=[];FAVS=[];go("#/");route()}},"Sign out"));
+  if(ME)kids.push(h("button",{class:"btn acout",onclick:()=>{doLogout();go("#/");route()}},"Sign out"));
   $app.replaceChildren(...kids)}
 
 async function route(){try{await loadShows();if(window.__splashHide)window.__splashHide();const p=location.hash.replace(/^#\/?/,"").split("/").filter(Boolean).map(decodeURIComponent);scrollTo(0,0);drawNav();
@@ -1505,7 +1582,8 @@ document.getElementById("logo").onclick=()=>{$q.value="";filter="all";lang="all"
 /* the list of shows and the account load in parallel; the page shows as soon as the shows arrive */
 function setHH(){const hd=document.querySelector("header"),nv=document.getElementById("nav"),r=document.documentElement.style;if(hd)r.setProperty("--hh",(hd.offsetHeight-1)+"px");if(nv)r.setProperty("--nh",nv.offsetHeight+"px")}
 setHH();setTimeout(setHH,300);addEventListener("resize",setHH);addEventListener("orientationchange",setHH);addEventListener("load",setHH);
-meReady=loadMe().then(()=>{const p=location.hash.replace(/^#\/?/,"").split("/")[0];if(SHOWS&&p!=="watch"&&store.get("token"))route()});
+cacheSchema();meLocal();let meSig0=meSig();
+meReady=loadMe().then(ok=>{if(ok===false)meRetry(1);else if(meSig()!==meSig0)meChanged()});
 route();
 </script>
 <script>

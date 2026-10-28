@@ -144,6 +144,64 @@ ARGON = "https://argon.razorshell.space/"
 # override with your own via env var TMDB_API_KEY.
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "1af06616dcbb28ff03088d87d63211f5")
 TMDB_CACHE_FILE = os.path.join(BASE_DIR, "tmdb_cache.json")
+
+# ---- Blitz disk state (text only; posters stay in the temp image cache) ----
+# Home list text (names, ratings, seasons, trending/top lists) and the episode
+# hub cache live here, so a restart or a RAM clean-up never starts from zero.
+def _pick_state_dir():
+    cands = [os.environ.get("STATE_DIR"),
+             os.path.join(os.path.dirname(os.environ.get("DB_PATH") or "/data/data.db"), "state"),
+             os.path.join(tempfile.gettempdir(), "rt_state")]
+    for d in cands:
+        if not d:
+            continue
+        try:
+            os.makedirs(d, exist_ok=True)
+            probe = os.path.join(d, ".w")
+            with open(probe, "w") as fh:
+                fh.write("1")
+            return d
+        except OSError:
+            continue
+    return ""
+
+
+STATE_DIR = _pick_state_dir()
+
+
+def _state_path(name):
+    return os.path.join(STATE_DIR, name) if STATE_DIR else ""
+
+
+def _state_write(name, data):
+    """Atomic write (tmp + rename).  Never raises; False when the disk refused."""
+    p = _state_path(name)
+    if not p:
+        return False
+    tmp = "%s.tmp%d" % (p, threading.get_ident())
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, p)
+        return True
+    except OSError as e:
+        print("[state] write failed:", name, repr(e)[:100], flush=True)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _state_read(name):
+    p = _state_path(name)
+    if not p:
+        return None
+    try:
+        with open(p, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
@@ -339,6 +397,7 @@ def _tmdb_boot():
             rec["genres"] = c.get("g", [])
             rec["desc"] = c.get("d", "")
             rec["rating"] = c.get("r")
+    _shows_cache["t"] = 0            # ratings/genres are in: rebuild the home list (and refresh the disk copy)
     _migrate_genres()
 
 
@@ -862,6 +921,70 @@ _live_cache = _LRU(250)                          # hub -> (expires, rows)
 _live_lock = threading.Lock()
 
 
+# The episode cache also lives on the Blitz disk (one small file per hub): the RAM
+# clean-up empties _live_cache at ~450 MB, and a restart empties it too - without
+# the disk copy every show would pay a cold 5-10 s hub fetch again.
+def _live_file(hub):
+    return "live_" + hashlib.sha1((hub or "").encode("utf-8")).hexdigest()[:20] + ".json"
+
+
+def _live_disk_put(hub, hit):
+    try:
+        _state_write(_live_file(hub), json.dumps({"h": hub, "x": hit[0], "r": hit[1]},
+                                                 separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        pass
+
+
+def _live_peek(hub):
+    """memory -> disk.  Returns (expires, rows) or None.  A disk entry is only used
+    while it is still inside its own TTL; it is then put back into memory."""
+    hit = _live_cache.get(hub)
+    if hit:
+        return hit
+    raw = _state_read(_live_file(hub))
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+        if d.get("h") != hub or float(d["x"]) <= time.time() or not isinstance(d.get("r"), list):
+            return None
+        hit = (float(d["x"]), d["r"])
+    except Exception:
+        return None
+    _live_cache[hub] = hit
+    return hit
+
+
+def _live_drop(hub):
+    """Forget one hub everywhere (memory + disk) - used when a fresh read is forced."""
+    _live_cache.pop(hub, None)
+    p = _state_path(_live_file(hub))
+    if p:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _live_disk_prune(max_age=2 * 86400):
+    """Boot: remove hub files nobody refreshed for 2 days (keeps the folder small)."""
+    if not STATE_DIR:
+        return
+    now = time.time()
+    try:
+        for fn in os.listdir(STATE_DIR):
+            if fn.startswith("live_"):
+                p = os.path.join(STATE_DIR, fn)
+                try:
+                    if now - os.path.getmtime(p) > max_age:
+                        os.remove(p)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
 def _live_rows(rec):
     """Re-parse the show's hub page on the site - the freshness path:
     brand-new episodes AND rotated movie zippers appear without a
@@ -872,10 +995,9 @@ def _live_rows(rec):
     if not hub:
         return []
     now = time.time()
-    with _live_lock:
-        hit = _live_cache.get(hub)
-        if hit and hit[0] > now:
-            return hit[1]
+    hit = _live_peek(hub)                      # memory, then the disk copy
+    if hit and hit[0] > now:
+        return hit[1]
     rows = []
     try:
         _resp = upstream_get(hub, referer=SITE)
@@ -1021,8 +1143,11 @@ def _live_rows(rec):
         rows = []
     if not rows and rec.get("hub"):
         applog.log_once("live-empty-" + hub, 3600, "warn", "live", f"no episodes parsed from {hub}")
+    entry = (now + (LIVE_TTL if rows else LIVE_NEG), rows)
     with _live_lock:
-        _live_cache[hub] = (now + (LIVE_TTL if rows else LIVE_NEG), rows)
+        _live_cache[hub] = entry
+    if rows:                                   # empty answers are short-lived: memory only
+        _live_disk_put(hub, entry)
     return rows
 
 
@@ -1910,6 +2035,7 @@ def _ep_titles(rec, wait=0.0):
 
 _live_inflight = {}          # hub -> Event, set when that hub's live refresh finished
 META_LIVE_WAIT = float(os.environ.get("META_LIVE_WAIT", "0.5"))
+META_NOEPS_WAIT = float(os.environ.get("META_NOEPS_WAIT", "1.5"))   # show with NO episodes yet: answer fast, app re-asks (ept_pending)
 
 
 def _live_soft(rec, wait):
@@ -1919,6 +2045,7 @@ def _live_soft(rec, wait):
     hub = rec.get("hub")
     if not hub:
         return True
+    _live_peek(hub)                            # pulls a still-valid disk copy into memory first
     with _live_lock:
         hit = _live_cache.get(hub)
         fresh = bool(hit and hit[0] > time.time())
@@ -1964,7 +2091,7 @@ def handle_meta(mtype, mid):
     try:
         with STORE_LOCK:
             has_eps = bool(rec["eps"])
-        live_done = _live_soft(rec, META_LIVE_WAIT if has_eps else RESOLVE_TIMEOUT + 4)
+        live_done = _live_soft(rec, META_LIVE_WAIT if has_eps else META_NOEPS_WAIT)
     except Exception:
         live_done = True
     if not rec.get("poster"):
@@ -2161,7 +2288,7 @@ def handle_stream(mtype, mid):
                   for r in rows)
     if not has_req:
         with _live_lock:
-            _live_cache.pop(rec.get("hub"), None)
+            _live_drop(rec.get("hub"))
         try:
             live = _live_rows(rec)
         except Exception:
@@ -2177,7 +2304,7 @@ def handle_stream(mtype, mid):
         # never see zero cards on the first tap -> ONE synchronous live
         # refresh + retry before serving whatever we have.
         with _live_lock:
-            _live_cache.pop(rec.get("hub"), None)
+            _live_drop(rec.get("hub"))
         try:
             live = _live_rows(rec)
         except Exception:
@@ -2196,7 +2323,7 @@ def handle_stream(mtype, mid):
             got = _resolve_picks(fp) if fp else {}     # joins walks in flight
             if len(got) < len(fp):                     # zipper may have rotated
                 with _live_lock:
-                    _live_cache.pop(rec.get("hub"), None)
+                    _live_drop(rec.get("hub"))
                 live = _live_rows(rec)
                 if live:
                     _absorb_live(rec, live, season)
@@ -2353,12 +2480,62 @@ def _api_shows_build():
     if guard.mode() != "off":                       # Step 6: fake anime for the honeypot (the website hides z:1)
         items.extend(guard.decoy_items(list(items)))
     items.sort(key=lambda x: x["name"].lower())
-    return {"shows": items, "now": int(time.time()), "popular": _popular(),
-            "trending": _trending("week"),
-            "trending_day": _trending("day"),
-            "trending_movies": _trending("movies"),
-            "top_rated": top_rated, "top_movies": top_movies,
-            "recent": recent, "recent_movies": recent_movies}
+    return _home_stamp({"shows": items, "now": int(time.time()), "popular": _popular(),
+                        "trending": _trending("week"),
+                        "trending_day": _trending("day"),
+                        "trending_movies": _trending("movies"),
+                        "top_rated": top_rated, "top_movies": top_movies,
+                        "recent": recent, "recent_movies": recent_movies})
+
+
+# ---- Home in slots: sections + version numbers ------------------------------
+# One home for everybody, cut into sections that each carry their own version
+# number, and every anime card carries its own version too.  The app asks the tiny
+# /api/home/v (a few bytes) every ~45 s and only downloads what really changed:
+# a whole section, or - for the cards - just the anime whose version differs.
+# Per-user things (continue watching, favourites) are NOT in here (/api/me).
+_HOME_SECS = {
+    "trending": ("popular", "trending", "trending_day", "trending_movies"),
+    "top": ("top_rated", "top_movies"),
+    "recent": ("recent", "recent_movies"),
+}
+_HOME = {"idx": None}
+ME_WAIT = float(os.environ.get("ME_WAIT") or 6)     # /api/me: longest wait for the DB, s
+_ME_LAST = _LRU(500)                               # token hash -> last good /api/me answer
+
+
+def _vh(obj):
+    return hashlib.md5(json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                                  ensure_ascii=False).encode("utf-8")).hexdigest()[:10]
+
+
+def _home_stamp(d):
+    """Add `v` to every card and `vers` (one number per section) to the payload."""
+    for it in d["shows"]:
+        it.pop("v", None)
+        it["v"] = _vh(it)[:8]
+    vers = {"cards": _vh(sorted((it["slug"], it["v"]) for it in d["shows"] if not it.get("z")))}   # honeypot fakes never count
+    for name, keys in _HOME_SECS.items():
+        vers[name] = _vh({k: d.get(k) for k in keys})
+    d["vers"] = vers
+    return d
+
+
+def _home_index(d):
+    """Cut a stamped payload into the pieces the /api/home/* routes serve."""
+    vers = d["vers"]
+    sec = {}
+    cards = json.dumps({"v": vers["cards"], "shows": d["shows"]}, ensure_ascii=False,
+                       separators=(",", ":")).encode("utf-8")
+    sec["cards"] = (cards, gzip.compress(cards, 6))
+    for name, keys in _HOME_SECS.items():
+        raw = json.dumps(dict({k: d.get(k) or [] for k in keys}, v=vers[name]),
+                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        sec[name] = (raw, gzip.compress(raw, 6))
+    vmap = json.dumps({"v": vers["cards"], "m": {it["slug"]: it["v"] for it in d["shows"] if not it.get("z")}},
+                      separators=(",", ":")).encode("utf-8")
+    _HOME["idx"] = {"vers": vers, "sec": sec, "vmap": (vmap, gzip.compress(vmap, 6)),
+                    "items": {it["slug"]: it for it in d["shows"]}}
 
 
 def _al_top(rows, is_movie, rated, limit):
@@ -2447,25 +2624,69 @@ _shows_cache = {"t": 0, "raw": None, "gz": None}
 _shows_lock = threading.Lock()
 
 
+HOME_FILE = "home_v2.json.gz"
+_HOME_GRACE = _env_int("HOME_DISK_GRACE", 600)   # s: how long a disk snapshot may stand in for a rebuild while the DB data is missing
+
+
+def _home_disk_load():
+    """Boot, BEFORE the port opens: the last home list (names, ratings, seasons,
+    trending / top lists - text only, no posters) straight from the Blitz disk,
+    so the first visitor never waits for a build or for the DB."""
+    blob = _state_read(HOME_FILE)
+    if not blob:
+        return False
+    try:
+        raw = gzip.decompress(blob)
+        d = json.loads(raw)
+        if not isinstance(d.get("shows"), list) or not d["shows"] or not d.get("vers"):
+            return False
+        raw = re.sub(rb'"now":\s*\d+', b'"now": %d' % int(time.time()), raw, count=1)
+        t = os.path.getmtime(_state_path(HOME_FILE))
+    except Exception as e:
+        print("[home] disk snapshot unreadable - ignored:", repr(e)[:120], flush=True)
+        return False
+    _shows_cache.update(raw=raw, gz=gzip.compress(raw, 6), t=t, disk=True)
+    _home_index(d)
+    print(f"[home] loaded from disk: {len(d['shows'])} shows, {len(raw) // 1024} KB, "
+          f"age {int(time.time() - t)}s", flush=True)
+    return True
+
+
 def _shows_rebuild():
+    # A build made BEFORE the DB data (ratings, genres, AniList) is in would be a worse
+    # copy than the disk snapshot: keep the snapshot until the DB answered (or the grace ran out).
+    if _shows_cache.get("disk") and not _TMDB_LOADED.is_set() and time.time() - _BOOT_T < _HOME_GRACE:
+        return
     raw = json.dumps(_api_shows_build(), ensure_ascii=False).encode("utf-8")
-    _shows_cache.update(raw=raw, gz=gzip.compress(raw, 6), t=time.time())
+    same = raw == _shows_cache.get("raw")
+    _shows_cache.update(raw=raw, gz=gzip.compress(raw, 6), t=time.time(), disk=False)
+    try:
+        _home_index(json.loads(raw))
+    except Exception as e:
+        print("[home] section index failed:", repr(e)[:120], flush=True)
+    if not same and _TMDB_LOADED.is_set():                 # only a complete list is worth keeping on disk
+        _state_write(HOME_FILE, gzip.compress(raw, 6))
 
 
-def index_page():
+def index_page(light=False):
     """index.html with the show list already INSIDE it (window.__BOOT__), so
-    the cards render on first paint instead of after a second request."""
+    the cards render on first paint instead of after a second request.
+    light=True: the page WITHOUT the list - for a phone that already holds the
+    home in its own slot cache (cookie hc=1): a small page, the home comes from
+    its cache at once and only what changed is fetched (/api/home/*)."""
     path = os.path.join(BASE_DIR, "index.html")
     try:
         mt = os.path.getmtime(path)
     except OSError:
         return None, None
-    try:
-        raw_json, _ = shows_payload()
-    except Exception:
-        raw_json = None
-    key = (_shows_cache["t"], mt)
-    c = _page_cache
+    raw_json = None
+    if not light:
+        try:
+            raw_json, _ = shows_payload()
+        except Exception:
+            raw_json = None
+    key = (_shows_cache["t"] if not light else 0, mt)
+    c = _page_cache_light if light else _page_cache
     if c["key"] == key and c["raw"]:
         return c["raw"], c["gz"]
     with open(path, "rb") as fh:
@@ -2497,6 +2718,7 @@ def shows_payload():
 
 _img_cache = {}
 _page_cache = {"key": None, "raw": None, "gz": None}
+_page_cache_light = {"key": None, "raw": None, "gz": None}
 
 
 IMG_DIR = os.environ.get("IMG_CACHE_DIR") or os.path.join(tempfile.gettempdir(), "rt_img")
@@ -2671,6 +2893,7 @@ def _popular():
 # franchise (the newest season) - never "Season 1" and "Season 4" together.
 TREND_TTL = _env_int("TREND_TTL", 3600)
 AL_TTL = _env_int("ANILIST_TTL", 3600)
+AL_BOOT_TIMEOUT = _env_int("AL_BOOT_TIMEOUT", 8)    # boot: AniList answers fast or we fall back to the DB copy
 SYNC_SECONDS = _env_int("SYNC_SECONDS", 3600)
 TREND_N = {"week": _env_int("TREND_WEEK_N", 80),
            "day": _env_int("TREND_DAY_N", 50),
@@ -2681,7 +2904,7 @@ RECENT_N = _env_int("RECENT_N", 40)
 AL_URL = "https://graphql.anilist.co"
 _al = {"t": 0.0, "ok": 0.0, "trend": [], "air": [], "mtrend": [], "mpop": [],
        "top": [], "mtop": [],
-       "busy": False, "err": "", "h": ""}
+       "busy": False, "err": "", "h": "", "api_ok": False, "db_ok": True}
 _trend_cache = {w: {"t": 0.0, "data": [], "busy": False, "h": ""}
                 for w in ("day", "week", "movies")}
 
@@ -2739,7 +2962,7 @@ def _al_slim(m):
             "sc": m.get("averageScore") or 0}
 
 
-def _al_page(sort, page, status=None, fmt=None):
+def _al_page(sort, page, status=None, fmt=None, timeout=20):
     var = {"p": page, "sort": [sort]}
     decl, args = "$p:Int,$sort:[MediaSort]", "type:ANIME,sort:$sort,countryOfOrigin:JP,isAdult:false"
     if status:
@@ -2754,7 +2977,7 @@ def _al_page(sort, page, status=None, fmt=None):
          "synonyms format status trending popularity averageScore}}}" % (decl, args))
     r = creq.post(AL_URL, json={"query": q, "variables": var},
                   headers={"User-Agent": UA, "Accept": "application/json"},
-                  timeout=20, impersonate="chrome")
+                  timeout=timeout, impersonate="chrome")
     if r.status_code != 200:
         raise RuntimeError(f"anilist HTTP {r.status_code} {(r.text or '')[:120]!r}")
     j = r.json()
@@ -2763,10 +2986,10 @@ def _al_page(sort, page, status=None, fmt=None):
     return ((j.get("data") or {}).get("Page") or {}).get("media") or []
 
 
-def _al_list(sort, pages, status=None, fmt=None):
+def _al_list(sort, pages, status=None, fmt=None, timeout=20):
     out = []
     for p in range(1, pages + 1):
-        res = _al_page(sort, p, status, fmt)
+        res = _al_page(sort, p, status, fmt, timeout)
         if not res:
             raise RuntimeError(f"anilist {sort} page {p} empty")
         out += res
@@ -2792,8 +3015,8 @@ def _al_load_db():
         if raw:
             d = json.loads(raw)
             t_db = float(meta.get("t") or 0)
-            if t_db <= _al["t"]:
-                return                           # already fetched something newer meanwhile
+            if t_db <= _al["ok"]:
+                return                           # the API already gave something newer
             _al.update({k: d.get(k) or [] for k in ("trend", "air", "mtrend", "mpop", "top", "mtop")})
             _al["h"] = meta.get("h") or _h(d)
             _al["t"] = t_db
@@ -2804,17 +3027,17 @@ def _al_load_db():
         print("[trend] AniList restore failed:", repr(e), flush=True)
 
 
-def _al_refresh():
+def _al_refresh(timeout=20):
     """Reload the AniList lists.  All-or-nothing.  Returns True when the
     answer DIFFERS from the stored one (and was saved), False otherwise."""
     try:
-        d = {"trend": _al_list("TRENDING_DESC", 3),
-             "air": _al_list("POPULARITY_DESC", 2, status="RELEASING"),
-             "mtrend": _al_list("TRENDING_DESC", 2, fmt="MOVIE"),
-             "mpop": _al_list("POPULARITY_DESC", 2, fmt="MOVIE"),
+        d = {"trend": _al_list("TRENDING_DESC", 3, timeout=timeout),
+             "air": _al_list("POPULARITY_DESC", 2, status="RELEASING", timeout=timeout),
+             "mtrend": _al_list("TRENDING_DESC", 2, fmt="MOVIE", timeout=timeout),
+             "mpop": _al_list("POPULARITY_DESC", 2, fmt="MOVIE", timeout=timeout),
              # AniList "Top Rated" = score order (TV series / movies kept apart, like our site)
-             "top": _al_list("SCORE_DESC", 4, fmt="TV"),
-             "mtop": _al_list("SCORE_DESC", 2, fmt="MOVIE")}
+             "top": _al_list("SCORE_DESC", 4, fmt="TV", timeout=timeout),
+             "mtop": _al_list("SCORE_DESC", 2, fmt="MOVIE", timeout=timeout)}
     except Exception as e:
         _al["err"] = repr(e)[:200]
         _al["t"] = time.time() - AL_TTL + 300         # retry in 5 min
@@ -2826,12 +3049,16 @@ def _al_refresh():
     # trending rank shifts constantly, so compare the SET of titles per list
     sig = _h({k: sorted(str(m["i"]) for m in v) for k, v in d.items()})
     changed = sig != _al["h"]
+    first = not _al["api_ok"]                      # first API answer of this run
     now = time.time()
-    _al.update(d, t=now, ok=now, err="")
+    _al.update(d, t=now, ok=now, err="", api_ok=True)
     if changed:
         _al["h"] = sig
-        _kv_put("al_cache", json.dumps(d, separators=(",", ":"), ensure_ascii=False))
-    _kv_put("al_meta", json.dumps({"t": now, "h": _al["h"]}))
+    if first:
+        _al_after()                                # trending + top rated NOW, before any (slow) DB write
+    r1 = _kv_put("al_cache", json.dumps(d, separators=(",", ":"), ensure_ascii=False)) if changed else True
+    r2 = _kv_put("al_meta", json.dumps({"t": now, "h": _al["h"]}))
+    _al["db_ok"] = bool(r1 and r2)                 # False = DB was unreachable; _boot_from_db saves it again
     print(f"[trend] AniList ok: {len(d['trend'])} trending, {len(d['air'])} airing, "
           f"{len(d['mtrend'])} movies ({'changed' if changed else 'unchanged'})", flush=True)
     return changed
@@ -2841,15 +3068,14 @@ _BOOT_T = time.time()
 
 
 def _al_ensure():
-    # cold DB: wait (max 5 min) for the saved AniList answer before asking AniList again
-    if not _DB_READY.is_set() and time.time() - _BOOT_T < 300:
-        return
+    # Boot order for trending + top rated:  AniList API  ->  DB copy  ->  our own signals.
+    # The API is asked at once (no waiting for the DB); the first try uses a short timeout.
     if time.time() - _al["t"] > AL_TTL and not _al["busy"]:
         _al["busy"] = True
 
         def _run():
             try:
-                _al_refresh()
+                _al_refresh(timeout=20 if _al["api_ok"] else AL_BOOT_TIMEOUT)
             finally:
                 _al["busy"] = False
         threading.Thread(target=_run, daemon=True).start()
@@ -3051,27 +3277,43 @@ def _build_trending_movies():
     return out[:TREND_N["movies"]]
 
 
+def _al_after():
+    """AniList answer is in (API or DB copy): rebuild trending + top rated NOW (not after TREND_TTL).
+    Memory first, so a slow DB can never hold the home page back; the DB saves come last."""
+    changed = []
+    for w in ("week", "day", "movies"):
+        try:
+            if _trend_rebuild(w, save=False):
+                changed.append(w)
+        except Exception as e:
+            print("[trend] rebuild failed:", w, repr(e), flush=True)
+    _shows_cache["t"] = 0                    # the website list (trending + top rated) is rebuilt on the next request
+    if _al["ok"]:
+        for w in changed:
+            _kv_put("trend_" + w, json.dumps(_trend_cache[w]["data"], separators=(",", ":")))
+
+
 def _trend_load_db():
     for w, c in _trend_cache.items():
         try:
             raw = accounts.kv_get("trend_" + w)
             if raw:
                 data = json.loads(raw)
-                if isinstance(data, list) and not c["t"]:      # not rebuilt yet
+                if isinstance(data, list) and (not c["t"] or not _al["ok"]):      # not rebuilt yet, or built without AniList (the saved list is better)
                     c["data"] = data
                     c["h"] = _h(data)
         except Exception as e:
             print("[trend] restore failed:", w, repr(e), flush=True)
 
 
-def _trend_rebuild(window):
+def _trend_rebuild(window, save=True):
     """Rebuild one list; save to the DB only when it actually changed.  -> changed?"""
     c = _trend_cache[window]
     data = _build_trending_movies() if window == "movies" else _build_trending(window)
     nh = _h(data)
     changed = nh != c["h"]
     c.update(t=time.time(), data=data, h=nh)
-    if changed:
+    if changed and save and _al["ok"]:      # a list built WITHOUT AniList must never overwrite the good saved one
         _kv_put("trend_" + window, json.dumps(data, separators=(",", ":")))
     return changed
 
@@ -3837,6 +4079,94 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _me(self):
+        """Per-user data (account, continue watching, favourites), apart from the home.
+        The DB may be asleep (a call can hang for a minute): wait only ME_WAIT seconds, then
+        answer with the last good copy (stale:true) or a quick 503 - the page never hangs on it.
+        401 (= really not signed in) is only ever sent when the DB itself said so."""
+        tok = self._token()
+        if not tok:
+            return self._send({"error": "Please sign in."}, 401)
+        key = hashlib.sha1(tok.encode("utf-8", "ignore")).hexdigest()
+        box = {}
+
+        def _job():
+            try:
+                u = accounts.user_for(tok)
+                if not u:
+                    box["r"] = None
+                    return
+                fb = {}
+
+                def _fav():
+                    try:
+                        fb["f"] = accounts.get_favs(u["id"])
+                    except Exception as e:
+                        fb["e"] = e
+                t2 = threading.Thread(target=_fav, daemon=True)
+                t2.start()                                  # the two lookups run in parallel
+                prog = accounts.get_progress(u["id"])
+                t2.join()
+                if "f" not in fb:
+                    raise fb.get("e") or RuntimeError("favs failed")
+                box["r"] = {"user": u, "progress": prog, "favs": fb["f"]}
+            except Exception as e:
+                box["e"] = e
+        th = threading.Thread(target=_job, daemon=True)
+        th.start()
+        th.join(ME_WAIT)
+        if "r" in box:
+            if box["r"] is None:
+                return self._send({"error": "Please sign in."}, 401)
+            _ME_LAST[key] = box["r"]
+            return self._send(box["r"])
+        last = _ME_LAST.get(key)
+        if last:
+            return self._send(dict(last, stale=True))
+        return self._send({"error": "Account service is waking up - try again in a moment.", "retry": 5}, 503)
+
+    def _home_route(self, path, qs):
+        """/api/home/v (tiny version check) | /s/<section> | /vmap | /items?s=a,b,c"""
+        if path == "/api/home/v":
+            if self._limit("homev", 60, 40, 30, "/api/home/v"):
+                return
+        elif not self._vip:
+            guard.track("shows", self._ip, self._dev)
+            if self._limit("shows", 60, guard.SHOWS_IP_MIN, guard.SHOWS_DEV_MIN, "/api/home"):
+                return
+        try:
+            shows_payload()                                # makes sure the home is built / refreshing
+        except Exception:
+            pass
+        idx = _HOME["idx"]
+        if not idx:
+            return self._send({"error": "home is still loading", "retry": 2}, 503)
+        if path == "/api/home/v":
+            return self._send({"v": idx["vers"], "now": int(time.time())})
+        if path == "/api/home/items":
+            want = [x for x in (qs.get("s") or [""])[0].split(",") if x][:80]
+            return self._send({"v": idx["vers"]["cards"],
+                               "items": [idx["items"][x] for x in want if x in idx["items"]]})
+        pair = idx["vmap"] if path == "/api/home/vmap" else None
+        m = re.match(r"^/api/home/s/(cards|trending|top|recent)$", path)
+        if m:
+            pair = idx["sec"][m.group(1)]
+        if not pair:
+            return self._send({"error": "not found"}, 404)
+        use_gz = "gzip" in (self.headers.get("Accept-Encoding") or "")
+        body = pair[1] if use_gz else pair[0]
+        self.send_response(200)
+        if use_gz:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        if not self._is_head:
+            self.wfile.write(body)
+
     def _send_raw(self, body, ctype, code=200):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -4223,8 +4553,8 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/api/signup", "/api/login"):
                 return self._auth(path, b)
             if path == "/api/logout":
-                accounts.logout(self._token())
-                return self._send({"ok": True})
+                threading.Thread(target=lambda t=self._token(): _safe(accounts.logout, t), daemon=True).start()
+                return self._send({"ok": True})          # the DB delete runs beside the answer: a sleeping DB never holds a sign-out
             u = accounts.user_for(self._token())
             if not u:
                 return self._send({"error": "Please sign in."}, 401)
@@ -4256,6 +4586,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send({"error": str(exc)}, 500)
 
     def _auth(self, path, b):
+        """Sign-in/sign-up with a friendly answer when the database is asleep (not a raw error text)."""
+        try:
+            return self._auth0(path, b)
+        except (BrokenPipeError, ConnectionResetError):
+            raise
+        except Exception as e:
+            applog.log_once("auth-db", 120, "warn", "app", f"{path} failed (DB asleep?): {e!r}")
+            return self._send({"error": "The account service is waking up. Please try again in a few seconds.",
+                               "retry": 5}, 503)
+
+    def _auth0(self, path, b):
         """/api/signup and /api/login (Step 10).
         Signup: game captcha ALWAYS (one passed game pays for ONE account), max SIGNUP_MAX accounts per IP (DB).
         Sign-in: captcha only when it looks like guessing (many wrong passwords / many tries).
@@ -4283,7 +4624,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send({"error": err}, 400)
             if guarded and self._pass:
                 captcha.signup_spend(tok_in)
-            return self._send({"token": tok, "user": accounts.user_for(tok)})
+            return self._send({"token": tok, "user": _user_quick(tok, user)})
         # sign-in
         if guarded:
             why = guard.login_why(ip, user)
@@ -4296,7 +4637,7 @@ class Handler(BaseHTTPRequestHandler):
             guard.login_note(ip, user, not err)
         if err:
             return self._send({"error": err}, 400)
-        return self._send({"token": tok, "user": accounts.user_for(tok)})
+        return self._send({"token": tok, "user": _user_quick(tok, user)})
 
     def _wn_route(self, target, b64, attach=None):
         """WN file through our own proxy.  attach = file name -> a download (200 + attachment)."""
@@ -4346,7 +4687,7 @@ class Handler(BaseHTTPRequestHandler):
         _public_base_holder["base"] = public_base_from(self)
         try:
             if path.rstrip("/") in ("", "/"):
-                raw, gz = index_page()
+                raw, gz = index_page(light="hc=1" in (self.headers.get("Cookie") or ""))
                 if raw is None:
                     self._send({"addon": ADDON_NAME, "version": VERSION,
                                 "status": "ok"})
@@ -4356,7 +4697,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 if use_gz:
                     self.send_header("Content-Encoding", "gzip")
-                self.send_header("Vary", "Accept-Encoding")
+                self.send_header("Vary", "Accept-Encoding, Cookie")
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-cache")
@@ -4422,15 +4763,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(body_)
                 return
             if path == "/api/me":
-                u = accounts.user_for(self._token())
-                if not u:
-                    return self._send({"error": "Please sign in."}, 401)
-                box = {}
-                th = threading.Thread(target=lambda: box.update(f=accounts.get_favs(u["id"])))
-                th.start()                                  # the two lookups run in parallel
-                prog = accounts.get_progress(u["id"])
-                th.join()
-                return self._send({"user": u, "progress": prog, "favs": box.get("f", [])})
+                return self._me()
             m = re.match(r"^/api/seen/([a-z0-9_]+)$", path)
             if m:
                 u = accounts.user_for(self._token())
@@ -4455,6 +4788,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._is_head:
                     self.wfile.write(body)
                 return
+            if path.startswith("/api/home/"):
+                return self._home_route(path, qs)
             if path == "/api/captcha/status":                  # Step 7: do I hold a valid pass?
                 return self._captcha(path, {})
             m = re.match(r"^/api/watch/([a-z0-9_]+)(?:/(\d+)/(\d+))?$", path)
@@ -4760,7 +5095,7 @@ def _fresh_tick(feed_pages):
         rec = by_hub.get(RI.strong(u))
         if rec:
             with _live_lock:
-                _live_cache.pop(rec.get("hub"), None)
+                _live_drop(rec.get("hub"))
             try:
                 _absorb_live(rec, _live_rows(rec))
                 touched += 1
@@ -4946,8 +5281,20 @@ def _boot_from_db():
         _catalog_delta_apply()
     except Exception as e:
         print("[rt2] catalog restore failed:", repr(e), flush=True)
-    _al_load_db()
+    had_api = bool(_al["api_ok"])
+    _al_load_db()                    # no-op when the API already answered (it is newer)
     _trend_load_db()
+    if had_api:
+        if not _al["db_ok"]:         # the API answered while the DB was asleep: save it now
+            try:
+                _kv_put("al_cache", json.dumps({k: _al[k] for k in ("trend", "air", "mtrend", "mpop", "top", "mtop")},
+                                               separators=(",", ":"), ensure_ascii=False))
+                _kv_put("al_meta", json.dumps({"t": _al["t"], "h": _al["h"]}))
+                _al["db_ok"] = True
+            except Exception as e:
+                print("[trend] AniList DB save failed:", repr(e), flush=True)
+    elif _al["ok"]:
+        _al_after()                  # API failed -> the DB copy of AniList is in: rebuild with it
     _shows_cache["t"] = 0            # rebuild the website list with the restored data
 
 
@@ -5011,7 +5358,7 @@ def _startup():
     threading.Thread(target=_mem_watch, daemon=True).start()
     threading.Thread(target=_restore_from_db, daemon=True).start()
     threading.Thread(target=_tmdb_boot, daemon=True).start()
-    _DB_READY.wait(300)              # cold DB: give it up to 5 min, then go on with the saved files
+    # (no wait for the DB here any more: the workers below start at once and the DB restore runs beside them)
     threading.Thread(target=_hourly_sync, daemon=True).start()
     threading.Thread(target=_auto_refresh, daemon=True).start()
     threading.Thread(target=_catalog_refresh, daemon=True).start()
@@ -5027,6 +5374,29 @@ def _startup():
             _fetch_poster(rec)
             time.sleep(1)
     threading.Thread(target=_posters, daemon=True).start()
+
+
+def _user_quick(tok, name, wait=1.5):
+    """The user object for a sign-in answer.  The DB may be slow: after `wait` s send just the name
+    (the app is signed in at once and fills in the rest from /api/me)."""
+    box = {}
+
+    def _j():
+        try:
+            box["u"] = accounts.user_for(tok)
+        except Exception:
+            pass
+    t = threading.Thread(target=_j, daemon=True)
+    t.start()
+    t.join(wait)
+    return box.get("u") or {"username": (name or "").lower()}
+
+
+def _safe(fn, *a):
+    try:
+        return fn(*a)
+    except Exception as e:
+        applog.log_once("safe-" + getattr(fn, "__name__", "fn"), 120, "warn", "app", f"{getattr(fn, '__name__', 'call')} failed: {e!r}")
 
 
 class _LimitedServer(ThreadingHTTPServer):
@@ -5058,6 +5428,11 @@ def main():
         threading.stack_size(1024 * 1024)       # many request threads: small stacks
     except Exception:
         pass
+    _live_disk_prune()
+    try:
+        _home_disk_load()                                         # home list from disk: ready before the first visitor
+    except Exception as e:
+        print("[home] disk load failed:", repr(e)[:120], flush=True)
     guard.start()                                                 # VIP keys + saved PROTECT mode (background)
     threading.Thread(target=_startup, daemon=True).start()        # port opens at once
     port = int(sys.argv[1]) if len(sys.argv) > 1 else PORT
