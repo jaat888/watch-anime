@@ -169,7 +169,8 @@ function run(host, o) {
   host.replaceChildren(hd, cvw, msg);
   const H = o.headers || {};
   async function post(url, body) {
-    const r = await fetch(url, { method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, H), body: JSON.stringify(body) });
+    const ac = typeof AbortController !== "undefined" ? new AbortController() : null, tm = ac ? setTimeout(() => ac.abort(), 25000) : 0;   /* slow network: give up after 25 s instead of "Loading…" for ever */
+    let r; try { r = await fetch(url, { method: "POST", headers: Object.assign({ "Content-Type": "application/json" }, H), body: JSON.stringify(body), signal: ac ? ac.signal : undefined }); } finally { clearTimeout(tm); }
     let j = {}; try { j = await r.json(); } catch (e) {} j._status = r.status; return j;
   }
   const say = t => { msg.textContent = t || ""; };
@@ -181,7 +182,13 @@ function run(host, o) {
   }
   const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(layout) : null; if (ro) ro.observe(cvw); layout();
 
-  async function start(note) {
+  async function start(note) {      /* any surprise while starting = a clear message + tap to retry, never "Loading…" for ever */
+    try { await start0(note); } catch (e) {
+      if (st.dead) return; st.phase = "err"; ttl.textContent = "Couldn't load"; chip.style.display = ""; say("Something went wrong - tap here to retry."); msg.style.cursor = "pointer";
+      msg.onclick = () => { msg.onclick = null; msg.style.cursor = ""; start(); };
+    }
+  }
+  async function start0(note) {
     st.phase = "load"; st.bul = []; st.fx = []; st.hint = 1; say(note || ""); ttl.textContent = "Loading…"; dots.textContent = ""; chip.style.display = "";
     if (!cvw.contains(cv)) cvw.replaceChildren(cv);
     const body = {}; if (o.lab) { body.lab = true; if (o.type !== undefined && o.type !== null && o.type !== "") body.type = +o.type; if (o.cfg) body.cfg = o.cfg; }
@@ -322,7 +329,7 @@ function modal(o) {
     ctl = run(card, Object.assign({}, o, { onPass: (tok, r) => setTimeout(() => close({ token: tok, ttl: r.ttl }), 650), onClose: () => close(null) }));
   });
 }
-const api = { modal, run, COLS, closeAll() { if (openModal) openModal(null); } };
+const api = { ver: 11, modal, run, COLS, closeAll() { if (openModal) openModal(null); } };
 root.CapGame = api;
 const math = { CapTapper, CAP, capBallPos, capBallColor, capSimShot, capAim, CapShooter, capSha256, capPowOk, capSolvePow, capZeroBits };
 root.CapMath = math;

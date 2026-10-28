@@ -769,7 +769,7 @@ let CAPT="",CAPX=0,CAPP=null;
 try{const c=JSON.parse(store.get("cap")||"null");if(c&&c.t&&c.x>Date.now()){CAPT=c.t;CAPX=c.x}}catch(e){}
 function capToken(){if(CAPT&&CAPX>Date.now())return CAPT;CAPT="";return ""}
 function capForget(){CAPT="";CAPX=0;store.del("cap")}
-function loadCap(){return new Promise((ok,no)=>{if(window.CapGame)return ok();const sc=document.createElement("script");sc.src="/captcha.js?v=10";sc.onload=ok;sc.onerror=()=>{sc.remove();no(new Error("captcha script"))};document.head.append(sc)})}
+function loadCap(){return new Promise((ok,no)=>{if(window.CapGame&&window.CapGame.ver===11)return ok();const sc=document.createElement("script");sc.src="/captcha.js?v=11";sc.onload=ok;sc.onerror=()=>{sc.remove();no(new Error("captcha script"))};document.head.append(sc)})}
 function solveCaptcha(){   /* -> Promise<true when passed>. One game at a time: everyone who asks waits for the same one. */
   if(CAPP)return CAPP;
   const p=(async()=>{try{let r;if(onTV())r=await tvPair();else{await loadCap();r=await CapGame.modal({headers:{"X-Device":DID}})}
@@ -954,7 +954,7 @@ function authModal(){let mode="login";
   sw.onclick=()=>{mode=mode==="login"?"signup":"login";p.autocomplete=mode==="login"?"current-password":"new-password";err.textContent="";title.textContent=ok.textContent=mode==="login"?"Sign in":"Create account";sw.textContent=mode==="login"?"New here? Create an account":"Have an account? Sign in"};
   ok.onclick=async()=>{if(ok.disabled)return;err.textContent="";ok.disabled=true;try{
     if(mode==="signup"&&onTV()&&!capToken()&&!await solveCaptcha()){err.textContent="Creating an account on a TV needs the phone check (QR).";return}   /* Step 9: signup on TV = QR every time there is no pass */
-    let j;for(let t=0;;t++){try{j=await api("/api/"+mode,{username:u.value.trim(),password:p.value});break}catch(e){if(e.status===403&&e.captcha&&t<2){capForget();if(await solveCaptcha())continue;throw new Error(onTV()?"Scan the QR with your phone to continue.":"Please finish the quick game to continue.")}throw e}}
+    let j;for(let t=0;;t++){try{j=await api("/api/"+mode,{username:u.value.trim(),password:p.value});break}catch(e){if(e.status===403&&e.captcha&&t<2){capForget();if(await solveCaptcha())continue;throw new Error(onTV()?"Scan the QR with your phone to continue.":"Please finish the quick check to continue.")}throw e}}
     store.set("token",j.token);meClear();if(j.user)meSet({user:j.user,progress:[],favs:[]});   /* signed in at once with what the server just said; progress/favourites follow from /api/me */
     m.remove();meSig0=meSig();route();const ok2=await loadMe();if(ok2===false)meRetry(1);else if(meSig()!==meSig0)meChanged()}catch(e){err.textContent=e.message||"Could not sign in. Please try again."}finally{ok.disabled=false}};
   p.onkeydown=e=>{if(e.key==="Enter")ok.click()};u.focus()}
