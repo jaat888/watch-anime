@@ -2123,12 +2123,16 @@ def handle_meta(mtype, mid):
                 pass
         _bg_once(("prewarm-movie", slug), _prewarm)
     info = _show_info(rec, wait=max(0.0, META_BUDGET - (time.monotonic() - t_meta)))
+    _pimg = rec["poster"] or None                # the picture: our own short link, so the source site's address is not shown in /meta
+    _pbase = _public_base_holder.get("base") or ""
+    if _pimg and _pbase and str(_pimg).startswith("https://"):
+        _pimg = _pbase.rstrip("/") + "/img/s/" + slug
     meta = {
         "id": mid,
         "type": mtype,
         "name": rec["name"],
-        "poster": rec["poster"] or None,
-        "background": rec["poster"] or None,
+        "poster": _pimg,
+        "background": _pimg,
         "description": info.get("d") or (f"{rec['name']} - every language the site "
                         "carries, streamed in-app as multi-quality HLS."),
         "overview": info.get("d") or "",
