@@ -146,6 +146,11 @@ function addCss() {
     + ".capchip{width:22px;height:22px;border-radius:50%;flex:none;border:2px solid #fff}.capt{flex:1;font-weight:700;font-size:15px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
     + ".capd{letter-spacing:3px;font-size:16px}.capx{width:48px;height:48px;border:0;background:transparent;color:inherit;font-size:22px;border-radius:14px}"
     + ".capcv{flex:1;display:flex;align-items:center;justify-content:center;min-height:0}.capcv canvas{touch-action:none;border-radius:14px;display:block}"
+    + ".captx{width:100%;max-width:340px;padding:6px 14px;display:flex;flex-direction:column;gap:12px;user-select:text;-webkit-user-select:text}"
+    + ".captx img{width:100%;height:auto;border-radius:12px;display:block;background:#eee;pointer-events:none}"
+    + ".captx input{width:100%;box-sizing:border-box;font:700 22px/1 system-ui,sans-serif;letter-spacing:5px;text-align:center;text-transform:uppercase;padding:14px 10px;border-radius:14px;border:2px solid var(--line,#3a3442);background:rgba(255,255,255,.06);color:inherit;outline:0}"
+    + ".captx input:focus{border-color:#ff5a2c}.captr{display:flex;gap:10px}.captr button{flex:1;height:48px;border-radius:14px;font:700 15px system-ui,sans-serif;border:0}"
+    + ".captb{background:#ff5a2c;color:#fff}.captb2{background:rgba(255,255,255,.1);color:inherit}.captr button:disabled{opacity:.5}"
     + ".capm{height:34px;flex:none;text-align:center;font-size:13px;line-height:34px;opacity:.85;padding:0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}";
   document.head.append(s);
 }
@@ -177,13 +182,39 @@ function run(host, o) {
   const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(layout) : null; if (ro) ro.observe(cvw); layout();
 
   async function start(note) {
-    st.phase = "load"; st.bul = []; st.fx = []; st.hint = 1; say(note || ""); ttl.textContent = "Loading…"; dots.textContent = "";
+    st.phase = "load"; st.bul = []; st.fx = []; st.hint = 1; say(note || ""); ttl.textContent = "Loading…"; dots.textContent = ""; chip.style.display = "";
+    if (!cvw.contains(cv)) cvw.replaceChildren(cv);
     const body = {}; if (o.lab) { body.lab = true; if (o.type !== undefined && o.type !== null && o.type !== "") body.type = +o.type; if (o.cfg) body.cfg = o.cfg; }
     let g; try { g = await post("/api/captcha/new", body); } catch (e) { g = {}; }
     if (st.dead) return;
     if (!g.id) { st.phase = "err"; ttl.textContent = "Couldn't load"; say(g._status === 429 ? "Too many tries - wait a minute, then tap here." : "Network problem - tap here to retry."); msg.style.cursor = "pointer"; msg.onclick = () => { msg.onclick = null; msg.style.cursor = ""; start(); }; return; }
+    if (g.game && g.game.mode === "text") { textStart(g); return; }
     st.id = g.id; st.game = g.game; st.cfg = g.cfg; st.tap = g.game.mode === "tap"; st.sh = st.tap ? new CapTapper(g.game, g.cfg) : new CapShooter(g.game, g.cfg); st.pow = capSolvePow(g.id, g.pow.salt, g.pow.bits);
     st.t0 = performance.now(); st.phase = "play"; if (o.onStart) o.onStart(g); head(); say(st.tap ? "Read the question below, then tap the right ball." : "Thumb in the lower half: slide, then let go.");
+  }
+  /* picture captcha: letters drawn by the server, typed here.  The answer is never in the page - only the picture. */
+  function textStart(g) {
+    st.id = g.id; st.pow = capSolvePow(g.id, g.pow.salt, g.pow.bits); st.phase = "text"; st.t0 = performance.now();
+    chip.style.display = "none"; ttl.textContent = "Quick check"; dots.textContent = "";
+    const box = D.createElement("div"); box.className = "captx";
+    const im = D.createElement("img"); im.src = g.game.img; im.alt = "Captcha picture"; im.draggable = false;
+    const inp = D.createElement("input"); inp.type = "text"; inp.maxLength = 16; inp.autocomplete = "off"; inp.setAttribute("autocapitalize", "characters"); inp.setAttribute("autocorrect", "off"); inp.spellcheck = false; inp.setAttribute("aria-label", "Your answer"); inp.placeholder = "Your answer";
+    const row = D.createElement("div"); row.className = "captr";
+    const rf = D.createElement("button"); rf.type = "button"; rf.textContent = "↻ New picture"; rf.className = "captb2";
+    const go = D.createElement("button"); go.type = "button"; go.textContent = "Verify"; go.className = "captb";
+    row.append(rf, go); box.append(im, inp, row); cvw.replaceChildren(box);
+    say("Do what the picture says. Several numbers? Put a space between them."); setTimeout(() => { try { inp.focus(); } catch (e) {} }, 60);
+    async function sendText() {
+      if (st.phase !== "text" || !inp.value.trim()) return; st.phase = "verify"; go.disabled = rf.disabled = inp.disabled = true; say("Checking…");
+      const nonce = await st.pow; if (st.dead) return;
+      let r; try { r = await post("/api/captcha/verify", { id: st.id, pow: nonce, text: inp.value, lab: o.lab ? true : undefined }); } catch (e) { r = { ok: false, why: "net" }; }
+      if (st.dead) return;
+      if (o.onVerified) o.onVerified(r, null);
+      if (r.ok) { st.phase = "pass"; ttl.textContent = "Verified ✓"; say(""); if (o.onPass) o.onPass(r.token, r); return; }
+      st.phase = "fail"; ttl.textContent = "Not quite"; say("Not right - here is a new picture."); st.autoT = setTimeout(() => start(), 900);
+    }
+    go.onclick = sendText; inp.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); sendText(); } });
+    rf.onclick = () => { if (st.phase === "text") { st.phase = "wait"; start("New picture…"); } };
   }
   function head() {
     if (st.tap) { chip.style.display = "none"; ttl.textContent = "Quick check"; dots.textContent = ""; return; }   /* tap mode: the real question is drawn on the canvas only, not in the page text */
@@ -247,7 +278,7 @@ function run(host, o) {
     const c = ctx; c.setTransform(sc, 0, 0, sc, 0, 0); c.clearRect(0, 0, CAP.W, CAP.H);
     const bg = c.createLinearGradient(0, 0, 0, CAP.H); bg.addColorStop(0, "#1a1622"); bg.addColorStop(1, "#2a2133"); c.fillStyle = bg; c.fillRect(0, 0, CAP.W, CAP.H);
     if (!st.tap) { c.fillStyle = "rgba(255,255,255,.045)"; c.fillRect(0, CAP.H / 2, CAP.W, CAP.H / 2); }          /* thumb zone */
-    if (st.phase === "load" || st.phase === "err") return;
+    if (st.phase === "load" || st.phase === "err" || st.phase === "text") return;
     const t = performance.now() - st.t0, g = st.game, cf = st.cfg, k = st.sh.k;
     for (let i = 0; i < g.balls.length; i++) { const p = capBallPos(g, i, t, cf); ball(p[0], p[1], cf.size, capBallColor(g, i, t, cf)); }
     /* bullets in flight + hit effects */

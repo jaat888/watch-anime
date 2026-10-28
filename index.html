@@ -714,9 +714,14 @@ html.tv .pskt{font-size:22px}html.tv .pskt button{font-size:22px}html.tv .player
 (function(){var old=!Element.prototype.replaceChildren;window.OLD_BROWSER=old;var P=null;
 /* hls.js is NOT loaded with the page any more (it blocked first paint). It loads when the player opens. */
 window.ensureHls=function(){if(window.Hls)return Promise.resolve();if(P)return P;
-P=new Promise(function(res){var sc=document.createElement("script");sc.crossOrigin="anonymous";sc.async=true;
-sc.src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/"+(old?"0.14.17":"1.5.13")+"/hls.min.js";
-sc.onload=sc.onerror=function(){res()};document.head.appendChild(sc);setTimeout(res,5000)});return P}})();
+var v=old?"0.14.17":"1.5.13",urls=["https://cdnjs.cloudflare.com/ajax/libs/hls.js/"+v+"/hls.min.js","https://cdn.jsdelivr.net/npm/hls.js@"+v+"/dist/hls.min.js"];
+/* a failed or slow download is NOT remembered: P is cleared so the next call tries again (before, one slow load made every later video skip hls.js until a page reload) */
+P=new Promise(function(res){var i=0;
+function next(){if(window.Hls){res();return}if(i>=urls.length){P=null;res();return}
+var sc=document.createElement("script"),done=0,t;sc.crossOrigin="anonymous";sc.async=true;sc.src=urls[i++];
+function fin(ok){if(done)return;done=1;clearTimeout(t);if(ok)res();else{try{sc.remove()}catch(e){}next()}}
+sc.onload=function(){fin(1)};sc.onerror=function(){fin(0)};t=setTimeout(function(){fin(0)},20000);document.head.appendChild(sc)}
+next()});return P}})();
 </script>
 <script>
 /* polyfills for old browsers (TV Chrome < 86) */
@@ -1312,7 +1317,7 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
   const pref=store.get("lang");let cur=src.findIndex(x=>x.lang===pref&&x.kind==="mq");if(cur<0)cur=src.findIndex(x=>x.kind==="mq");if(cur<0)cur=0;
   await meWait(1500);if(!alive())return;
   const saved=PROG.find(p=>p.slug===slug&&(s.movie||(p.season==season&&p.episode==episode)));let resume=saved&&saved.pos>10&&saved.dur-saved.pos>30?saved.pos:0,qSel=-1;
-  let markT=0;
+  let markT=0,kicks=0,began=0;
   function mark(ended){if(!video.duration||!isFinite(video.duration))return;const k=(+season||0)+":"+(+episode||0),pct=epProgSet(slug,+season||0,+episode||0,ended?video.duration:video.currentTime,video.duration,ended);if(!alive())return;const bx=epBox.querySelector('[data-k="'+k+'"]');if(bx)setEpBox(bx,pct)}
   function save(ended){mark(ended);if(!ME||!video.duration)return;const r={slug,season:+season||0,episode:+episode||0,pos:ended?video.duration:video.currentTime,dur:video.duration};
     api("/api/progress",r).then(()=>{const i=PROG.findIndex(p=>p.slug===slug);if(i>=0)PROG.splice(i,1);PROG.unshift(r)}).catch(()=>{})}
@@ -1339,19 +1344,21 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
   function play(i){cur=i;tried.add(i);clearInterval(saveTimer);clearInterval(wdT);clearInterval(markT);markT=setInterval(()=>{if(!alive()){clearInterval(markT);return}if(!video.paused)mark()},2000);if(hls){hls.destroy();hls=null}qSel=-1;msg.style.display="flex";msg.textContent="Loading…";sels.replaceChildren(speed,pic);
     const x=src[i];store.set("lang",x.lang);
     langBox.replaceChildren(...src.map((y,j)=>h("button",{class:"chip","aria-pressed":String(j===i),onclick:()=>play(j)},y.lang+(y.quality?" "+y.quality:""))));
-    const bad=t=>{msg.style.display="flex";msg.replaceChildren(h("div",{},t||"This stream failed to load.",h("div",{style:"margin-top:12px"},h("button",{class:"chip",onclick:()=>{tried.clear();play(cur)}},"↻ Retry"))))};
+    const bad=t=>{msg.style.display="flex";msg.replaceChildren(h("div",{},t||"This stream failed to load.",h("div",{style:"margin-top:12px"},h("button",{class:"chip",onclick:()=>{kicks=0;tried.clear();msg.textContent="Loading…";ensureHls().then(()=>renew().then(ok=>{if(!ok&&alive())play(cur)}))}},"↻ Retry"))))};
     const fallback=()=>{const nx=src.findIndex((y,j)=>!tried.has(j));if(nx<0)return false;msg.style.display="flex";msg.textContent="Switching to "+src[nx].lang+"…";play(nx);return true};
-    const hideMsg=()=>{msg.style.display="none";buf.style.display="none"};let stallT=0;
+    const hideMsg=()=>{began=1;kicks=0;msg.style.display="none";buf.style.display="none"};let stallT=0,t0=Date.now();began=0;
     video.onplaying=hideMsg;video.onloadeddata=hideMsg;video.oncanplay=hideMsg;
     video.onwaiting=()=>{if(msg.style.display!=="flex")buf.style.display="block"};
     video.onseeking=()=>{if(msg.style.display!=="flex")buf.style.display="block"};
     let lastT=-1,stuck=0,rec=0;
-    wdT=setInterval(()=>{if(!hls)return;const t=video.currentTime;
+    wdT=setInterval(()=>{if(!alive())return;
+      if(!began&&Date.now()-t0>30000){t0=Date.now();if(kicks++<3){msg.style.display="flex";msg.textContent="Taking too long, getting a fresh link…";renew().then(ok=>{if(!ok&&alive())play(cur)})}else bad("This video did not start. Check your connection and tap Retry.");return}
+      if(!hls)return;const t=video.currentTime;
       if(video.readyState<3&&(video.seeking||!video.paused)){if(Math.abs(t-lastT)<0.01)stuck++;else{stuck=0;lastT=t}
         if(stuck>=3){stuck=0;rec++;hls.stopLoad();hls.startLoad(t);if(rec%3===0)hls.recoverMediaError()}}
       else{stuck=0;lastT=t}},2000);
     video.onseeked=()=>{if(video.readyState>=3)buf.style.display="none"};
-    video.onerror=()=>{if(!hls&&!fallback())bad()};video.onloadedmetadata=()=>{if(resume){video.currentTime=resume;resume=0}};
+    video.onerror=()=>{if(!alive()||hls)return;if(!fallback())bad()};video.onloadedmetadata=()=>{if(resume){video.currentTime=resume;resume=0}};
     saveTimer=setInterval(()=>{if(!video.paused)save()},10000);video.onpause=()=>{if(!video.ended)save()};
     if(x.kind==="mq"&&window.Hls&&Hls.isSupported()){const pol=(n,d,ttfb,load)=>({default:{maxTimeToFirstByteMs:ttfb,maxLoadTimeMs:load,timeoutRetry:{maxNumRetry:n,retryDelayMs:0,maxRetryDelayMs:0},errorRetry:{maxNumRetry:n+2,retryDelayMs:d,maxRetryDelayMs:6000}}});
       hls=new Hls({maxBufferLength:30,maxMaxBufferLength:60,maxBufferSize:40*1e6,backBufferLength:15,maxBufferHole:0.6,nudgeMaxRetry:8,capLevelToPlayerSize:true,startFragPrefetch:true,abrBandWidthFactor:0.8,abrBandWidthUpFactor:0.6,manifestLoadPolicy:pol(3,1000,10000,20000),levelLoadPolicy:pol(3,1000,10000,20000),fragLoadPolicy:pol(4,800,12000,30000)});
@@ -1361,10 +1368,13 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
       hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED,()=>{if(hls.subtitleTracks.length)sels.append(h("select",{onchange:e=>{hls.subtitleTrack=+e.target.value}},h("option",{value:-1},"Subtitles: Off"),hls.subtitleTracks.map((t,k)=>h("option",{value:k},"Subtitles: "+(t.name||t.lang||k+1)))))});
       hls.on(Hls.Events.AUDIO_TRACKS_UPDATED,()=>{if(hls.audioTracks.length>1)sels.append(h("select",{onchange:e=>{hls.audioTrack=+e.target.value}},hls.audioTracks.map((t,k)=>h("option",{value:k},"Audio: "+(t.name||t.lang||k+1)))))});
       hls.on(Hls.Events.FRAG_BUFFERED,()=>{netTry=0});
-      hls.on(Hls.Events.ERROR,(_e,d)=>{if(!d.fatal)return;
+      hls.on(Hls.Events.ERROR,(_e,d)=>{if(!d.fatal||!alive())return;
+        const rc=d.response&&d.response.code;
+        if(d.type===Hls.ErrorTypes.NETWORK_ERROR&&rc>=400&&kicks<3){kicks++;msg.style.display="flex";msg.textContent="Getting a fresh link…";const kk=kicks;setTimeout(()=>{if(alive())renew().then(ok=>{if(!ok&&alive())play(cur)})},2000*kk);return}
         if(d.type===Hls.ErrorTypes.NETWORK_ERROR&&netTry++<4){beatNow();buf.style.display="block";setTimeout(()=>{if(hls)hls.startLoad(video.currentTime||-1)},1500*netTry)}
         else if(d.type===Hls.ErrorTypes.MEDIA_ERROR&&medTry++<3){if(medTry===2)hls.swapAudioCodec();hls.recoverMediaError()}
         else if(!fallback())bad("This stream failed to load. Please try again in a moment.")})}
+    else if(x.kind==="mq"&&!(video.canPlayType&&video.canPlayType("application/vnd.apple.mpegurl"))){bad("The video player could not load. Check your connection and tap Retry.")}
     else{video.src=x.url;video.play().catch(()=>{hideMsg()})}}
   await hlsP;if(!alive())return;
   const rows=()=>{const r=[],q=hls&&hls.levels&&hls.levels.length>1;
@@ -1383,12 +1393,12 @@ async function watchPage(slug,season,episode){killPlayer();const hlsP=ensureHls(
      If the link is nearly over (or the network changed) we quietly fetch a fresh link and carry on from the same second. */
   let hbT=0,renewing=0,keepPaused=0,beatNow=()=>{};
   const tokOf=u=>{const m=/\/mq\/([^\/.?]+)\.m3u8/.exec(u||"")||/^\/wn\/([^\/.?]+)$/.exec(u||"");return m?m[1]:""};
-  async function renew(){if(renewing||!alive())return;renewing=1;
+  async function renew(){if(renewing)return 1;if(!alive())return 0;renewing=1;
     try{const d=await watchApi(s,season,episode);if(!alive())return;
-      const ns=d.sources||[];if(!ns.length||!tokOf((ns[Math.min(cur,ns.length-1)]||{}).url))return;
+      const ns=d.sources||[];if(!ns.length||!tokOf((ns[Math.min(cur,ns.length-1)]||{}).url))return 0;
       src.forEach((y,j)=>{const f=ns.find(z=>z.lang===y.lang&&z.kind===y.kind&&z.quality===y.quality)||ns[j];if(f)src[j]=f});
-      const t=video.currentTime||0;if(t>1)resume=t;keepPaused=video.paused?1:0;tried.clear();play(cur)}
-    catch(e){}finally{renewing=0}}
+      const t=video.currentTime||0;if(t>1)resume=t;keepPaused=video.paused?1:0;tried.clear();play(cur);return 1}
+    catch(e){return 0}finally{renewing=0}}
   if(data.sess){
     const beat=async()=>{if(!alive()){clearInterval(hbT);document.removeEventListener("visibilitychange",beat);return}
       const t=tokOf((src[cur]||{}).url);if(!t)return;

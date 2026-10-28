@@ -63,9 +63,21 @@ POW_BITS = _num("CAPTCHA_POW_BITS", 14, 0, 24, int)       # hidden puzzle: leadi
 BURST_MAX = _num("CAPTCHA_BURST", 5, 2, 50, int)          # this many DIFFERENT videos in BURST_WIN s = rate limit seen
 BURST_WIN = 60
 HUMAN_FAIL = 60                     # human score (0-100) from which the shots are called a bot's
-MODE = os.environ.get("CAPTCHA_MODE", "tap").strip().lower()   # "tap" = tap the ball of the asked colour (easy) | "shoot" = old cannon game
-if MODE not in ("tap", "shoot"):
-    MODE = "tap"
+MODE = os.environ.get("CAPTCHA_MODE", "text").strip().lower()   # "text" = type the distorted letters (sarkari style) | "tap" = tap the ball of the asked colour | "shoot" = old cannon game
+if MODE not in ("text", "tap", "shoot"):
+    MODE = "text"
+try:
+    import textcaptcha
+    if MODE == "text" and not textcaptcha.OK:      # Pillow is not installed: keep the site working with the ball game
+        MODE = "tap"
+except Exception:
+    textcaptcha = None
+    if MODE == "text":
+        MODE = "tap"
+TEXT_LEN = _num("CAPTCHA_TEXT_LEN", 6, 4, 8, int)          # letters in the picture
+TEXT_MATH_PCT = _num("CAPTCHA_MATH_PCT", 30, 0, 100, int)         # % of the pictures that are a small sum (7+4-2=?)
+TEXT_SORT_PCT = _num("CAPTCHA_SORT_PCT", 30, 0, 100, int)         # % that are "put these 3-4 numbers in order" (the rest: letters)
+TEXT_MIN_MS = _num("CAPTCHA_TEXT_MIN_MS", 1500, 300, 10000, int)   # typing the answer cannot be faster than this (a program is)
 ROTATE_DAYS = _num("CAPTCHA_ROTATE_DAYS", 14, 1, 365, int)
 CONC_HARD = _num("CAPTCHA_CONC_HARD", 4, 2, 50, int)      # even a proven human may not run more live streams than this
 TV_HOURS = _num("CAPTCHA_TV_HOURS", 8, 1, 48, int)         # Step 9: TV pass lives this long (plan: 6-12 hours)
@@ -338,11 +350,14 @@ def new(ip, dev="", typ=None, over=None, now=None):
     """Start a captcha.  typ / over (game type, number overrides) are for the admin's game lab only."""
     try:
         now = now or time.time()
+        lab_typ = typ is not None
         c = cfg()
         c.update(_clean(over))
         if typ is None or not (0 <= int(typ) < len(TYPES)):
             typ = active_types(now)[secrets.randbelow(2)]
         typ = int(typ)
+        if MODE == "text" and not over and not lab_typ:        # the normal site: a picture of letters (the game lab still gets the game)
+            return _new_text(ip, dev, now)
         seed = secrets.randbits(32)
         L = layout(seed, typ, c)
         ipk = _ipk(ip)
@@ -350,7 +365,7 @@ def new(ip, dev="", typ=None, over=None, now=None):
         cid = secrets.token_urlsafe(12)
         salt = secrets.token_hex(8)
         rec = {"id": cid, "ipk": ipk, "dev": dev or "", "t0": now, "exp": now + TTL, "seed": seed, "L": L, "c": c,
-               "salt": salt, "bits": bits, "mode": MODE}
+               "salt": salt, "bits": bits, "mode": "tap" if MODE == "text" else MODE}
         with _lock:
             _prune(now)
             _open[cid] = rec
@@ -358,12 +373,32 @@ def new(ip, dev="", typ=None, over=None, now=None):
             _stat["new"] += 1
         return {"id": cid, "ttl": TTL, "w": W, "h": H, "cannon": list(CANNON), "bullet_r": BULLET_R,
                 "cfg": {k: c[k] for k in ("speed", "size", "balls", "color_ms", "bullet", "hits", "max_shots", "min_shot_ms", "slack")},
-                "game": {"mode": MODE, "type": typ, "name": TYPES[typ], "balls": L["balls"], "targets": L["targets"][: int(c["max_shots"])],
+                "game": {"mode": "tap" if MODE == "text" else MODE, "type": typ, "name": TYPES[typ], "balls": L["balls"], "targets": L["targets"][: int(c["max_shots"])],
                          "skews": L["skews"][: int(c["max_shots"])]},
                 "pow": {"salt": salt, "bits": bits, "how": "sha256(id:salt:nonce) with `bits` leading zero bits"}}
     except Exception as e:
         _log("error", "new() failed: %r" % (e,), key="cap_new_err", ttl=300)
         return None
+
+
+def _new_text(ip, dev, now):
+    """A picture-of-letters captcha.  The answer stays here; the visitor only gets the picture."""
+    ipk = _ipk(ip)
+    r = secrets.randbelow(100)                                   # the visitor (and a program) never knows which kind comes
+    kind = "sort" if r < TEXT_SORT_PCT else "math" if r < TEXT_SORT_PCT + TEXT_MATH_PCT else "letters"
+    ans, img = (textcaptcha.make_sort() if kind == "sort" else textcaptcha.make_math() if kind == "math" else textcaptcha.make(TEXT_LEN))
+    bits = POW_BITS + (2 if _fails_recent(ipk, now) >= 3 else 0)
+    cid = secrets.token_urlsafe(12)
+    salt = secrets.token_hex(8)
+    rec = {"id": cid, "ipk": ipk, "dev": dev or "", "t0": now, "exp": now + TTL, "salt": salt, "bits": bits,
+           "mode": "text", "kind": kind, "ans": ans if kind == "sort" else textcaptcha.norm(ans)}
+    with _lock:
+        _prune(now)
+        _open[cid] = rec
+    with _stat_lock:
+        _stat["new"] += 1
+    return {"id": cid, "ttl": TTL, "cfg": {}, "game": {"mode": "text", "img": img},
+            "pow": {"salt": salt, "bits": bits, "how": "sha256(id:salt:nonce) with `bits` leading zero bits"}}
 
 
 def _take(cid, ip, now):
@@ -545,7 +580,7 @@ def verify(cid, ip, body, now=None, lab=False):
         if not rec:
             _record(ip, False, why)
             return {"ok": False, "why": why, "retry": True}
-        c, L = rec["c"], rec["L"]
+        c, L = rec.get("c"), rec.get("L")
         detail = {}
 
         def fail(w, score=0):
@@ -555,6 +590,8 @@ def verify(cid, ip, body, now=None, lab=False):
                 out.update(real_why=w, **detail)
             return out
 
+        if rec.get("mode") == "text":
+            return _verify_text(rec, body, ip, now, fail)
         tap = rec.get("mode") == "tap"
         shots = (_read_taps if tap else _read_shots)(body, c)
         if shots is None:
@@ -593,6 +630,22 @@ def verify(cid, ip, body, now=None, lab=False):
     except Exception as e:
         _log("error", "verify() failed: %r" % (e,), key="cap_ver_err", ttl=300)
         return {"ok": False, "why": "error", "retry": True}
+
+
+def _verify_text(rec, body, ip, now, fail):
+    """Picture captcha: hidden proof-of-work, not typed faster than a person can, then the letters themselves."""
+    if not pow_ok(rec["id"], rec["salt"], rec["bits"], body.get("pow")):
+        return fail("pow")
+    if (now - rec["t0"]) * 1000 < TEXT_MIN_MS:
+        return fail("speed")
+    if rec.get("kind") == "sort":                       # numbers in the right order; any separator is fine
+        typed = ",".join(str(x) for x in textcaptcha.parse_nums(body.get("text")))
+    else:
+        typed = textcaptcha.norm(body.get("text"))
+    if not typed or not hmac.compare_digest(typed.encode(), rec["ans"].encode()):
+        return fail("miss")
+    _record(ip, True, "", 0, int((now - rec["t0"]) * 1000))
+    return {"ok": True, "token": make_pass(ip, now=now), "ttl": PASS_TTL}
 
 
 # ------------------------------------------------------------ pass token ----
