@@ -69,6 +69,94 @@ import skiptimes
 import requests
 from curl_cffi import requests as creq
 
+# TLS handling.  codedew.com (zipper) sends an INCOMPLETE certificate chain (intermediate missing): Chrome repairs that itself,
+# curl does not -> "unable to get local issuer certificate (20)" and no stream.  No CA list can fix a server-side gap, so:
+#   * default (TLS_VERIFY unset / 1): AUTO mode - verify normally; if a SCRAPING / VIDEO host fails with a certificate error,
+#     that host alone is remembered and retried without verification (logged once as "[tls] auto-insecure host: ...").
+#     TMDB / AniList / HF / Jikan etc. are never relaxed.
+#   * TLS_VERIFY=0: certificate checks are skipped for all scraping + video requests from the first call.
+TLS_VERIFY = os.environ.get("TLS_VERIFY", "1") != "0"
+_TLS_NEVER = ("themoviedb.org", "anilist.co", "jikan.moe", "huggingface.co", "hf.space", "imdb.com", "strem.io")
+_TLS_RELAXED = set()                 # hosts that proved to have a broken chain
+_TLS_ERR_MARK = ("certificate", "ssl", "(60)", "(51)", "(35)")
+
+
+def _tls_host(url):
+    try:
+        return (urlparse(str(url)).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _tls_is_cert_error(exc):
+    t = (type(exc).__name__ + " " + str(exc)).lower()
+    return "certificate" in t or "ssl" in t or "(60)" in t
+
+
+def _tls_may_relax(host):
+    return bool(host) and not any(host == n or host.endswith("." + n) for n in _TLS_NEVER)
+
+
+def _tls_note(host):
+    if host not in _TLS_RELAXED:
+        _TLS_RELAXED.add(host)
+        print("[tls] auto-insecure host: %s (server sends an incomplete certificate chain)" % host, flush=True)
+
+
+try:
+    import urllib3 as _u3
+    _u3.disable_warnings()
+except Exception:
+    pass
+
+_creq_get_orig, _creq_post_orig = creq.get, creq.post
+_CreqSessionOrig = creq.Session
+
+
+def _tls_call(fn, url, kw):
+    host = _tls_host(url)
+    if not TLS_VERIFY and "verify" not in kw:
+        kw = dict(kw, verify=False)
+    elif host in _TLS_RELAXED and "verify" not in kw:
+        kw = dict(kw, verify=False)
+    try:
+        return fn(url, **kw)
+    except Exception as exc:
+        if kw.get("verify") is False or not _tls_is_cert_error(exc) or not _tls_may_relax(host):
+            raise
+        _tls_note(host)
+        return fn(url, **dict(kw, verify=False))
+
+
+def _creq_get(url, **kw):
+    return _tls_call(_creq_get_orig, url, kw)
+
+
+def _creq_post(url, **kw):
+    return _tls_call(_creq_post_orig, url, kw)
+
+
+class _CreqSession(_CreqSessionOrig):
+    def request(self, method, url, *a, **kw):
+        host = _tls_host(url)
+        if (not TLS_VERIFY or host in _TLS_RELAXED) and "verify" not in kw:
+            kw["verify"] = False
+        try:
+            return super().request(method, url, *a, **kw)
+        except Exception as exc:
+            if kw.get("verify") is False or not _tls_is_cert_error(exc) or not _tls_may_relax(host):
+                raise
+            _tls_note(host)
+            kw["verify"] = False
+            return super().request(method, url, *a, **kw)
+
+
+creq.get, creq.post, creq.Session = _creq_get, _creq_post, _CreqSession
+if not TLS_VERIFY:
+    print("[tls] TLS_VERIFY=0 -> certificate checks are OFF for site / zipper / video requests", flush=True)
+
+
+
 
 # ------------------------------------------------ memory safety (RAM fix) ---
 class _LRU(dict):
@@ -134,13 +222,56 @@ _LW             = LIST_WAIT if OPTIMISTIC else LIST_BUDGET
 SHOWS_TTL       = _env_int("SHOWS_TTL", 45)        # /api/shows payload cache
 PL_TTL          = _env_int("PL_TTL", 300)          # HLS playlist cache (VOD)
 
-VERSION  = "3.6.0"
+VERSION  = "3.6.1"
 ADDON_ID = "community.raretoons2"
 ID_PREFIX = "wa2"                       # new public id prefix (website + new installs)
 ID_PREFIXES = ("wa2", "raretoons2")     # raretoons2 kept so old Stremio libraries keep working
 ADDON_NAME = "mollad_jaat"
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-SITE = "https://www.rareanimes.mov/"
+SITE = os.environ.get("SITE_URL", "https://www.rareanimes.foo/").rstrip("/") + "/"   # site moved .mov -> .foo (Nov 2026)
+# Zipper (link redirector) moved codedew.com -> animetoonhindi.com.  Any host can be added with Space variable ZIP_HOSTS="a.com,b.com";
+# new hosts are ALSO learned automatically from the source site's own pages (see _learn_site).
+ZIP_HOSTS = set(h.strip().lower() for h in (os.environ.get("ZIP_HOSTS", "") + ",codedew.com,animetoonhindi.com").split(",") if h.strip())
+_ZH = r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}"          # any host: a zipper link is recognised by its /zipper/?url= path
+_SITE_HOSTS = {"www.rareanimes.mov", "rareanimes.mov", "www.rareanimes.com", "rareanimes.com"}
+_SITE_HOSTS.add((urlparse(SITE).hostname or "").lower())
+
+
+def _is_zip(u):
+    u = u or ""
+    try:
+        return urlparse(u).scheme == "https" and (urlparse(u).hostname or "").lower() in ZIP_HOSTS
+    except Exception:
+        return False
+
+
+def _learn_site(url, r):
+    """Self-heal when the source site changes domain.  The site answers an old address with a redirect (301/302) to the new one,
+    and our HTTP client follows it - so the page arrives fine, but any hard-coded host no longer matches.  Here we (1) adopt the
+    redirect target as the new SITE and (2) learn every zipper host that appears in the site's own pages."""
+    global SITE
+    try:
+        if r.status_code != 200:
+            return
+        uh = (urlparse(url).hostname or "").lower()
+        fh = (urlparse(str(getattr(r, "url", "") or url)).hostname or "").lower()
+        if not fh or uh not in _SITE_HOSTS:
+            return
+        text = r.text or ""
+        if fh not in _SITE_HOSTS:
+            if "/zipper/" in text or "wp-content" in text or "pisode" in text:
+                _SITE_HOSTS.add(fh)
+                SITE = "https://" + fh + "/"
+                print("[site] domain moved: %s -> %s (auto-adopted; set Space variable SITE_URL to pin it)" % (uh, fh), flush=True)
+            else:
+                return
+        for zh in set(re.findall(r"https://((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})/zipper/\?url=", text)):
+            zh = zh.lower()
+            if zh not in ZIP_HOSTS:
+                ZIP_HOSTS.add(zh)
+                print("[site] new zipper host learned: %s" % zh, flush=True)
+    except Exception:
+        pass
 ARGON = "https://argon.razorshell.space/"
 # Public default key (same one Cinemeta-style community addons embed);
 # override with your own via env var TMDB_API_KEY.
@@ -461,8 +592,10 @@ def upstream_get(url, referer=None, timeout=RESOLVE_TIMEOUT):
                "Accept-Language": "en-US,en;q=0.9"}
     if referer:
         headers["Referer"] = referer
-    return creq.get(url, headers=headers, timeout=timeout,
-                    allow_redirects=True, impersonate="chrome")
+    r = creq.get(url, headers=headers, timeout=timeout,
+                 allow_redirects=True, impersonate="chrome")
+    _learn_site(url, r)
+    return r
 
 
 def _cf_blocked(text):
@@ -604,7 +737,7 @@ def _zipper_walk(zipper, deadline):
             return text, None               # e.g. hubcloud download drive
         prev, url = url, hop.group(1).replace("&amp;", "&")
         if url.startswith("/"):
-            url = "https://codedew.com" + url
+            url = urljoin(prev, url)
     return text, None
 
 
@@ -625,7 +758,7 @@ def _optimistic_zipper(zippers):
     the real resolve happens at play time (and is already warming)."""
     now = time.time()
     for z in zippers[:3]:
-        if not z.startswith("https://codedew.com/"):
+        if not _is_zip(z):
             continue
         with _hls_lock:
             h = _hls_cache.get(z)
@@ -902,9 +1035,9 @@ def _resolve_wn(cands, budget=LIST_BUDGET, wait=None):
 _EP_POS_RE = re.compile(r"Episode\s*0*(\d{1,3})", re.I)
 _LANG_ZIP_RE = re.compile(
     r"color:\s*#[0-9a-fA-F]+;?[^>]*>\s*([A-Za-z][A-Za-z ]{1,18})"
-    r"\s*</span>[^<]{0,60}?<a[^>]+href=\"([^\"]*codedew\.com/zipper[^\"]*)\"",
+    r"\s*</span>[^<]{0,60}?<a[^>]+href=\"([^\"]*/zipper/\?url=[^\"]*)\"",
     re.S)
-_HUB_ZIP_RE = re.compile(r'href="(https://codedew\.com/zipper/\?url=[^"]+)"')
+_HUB_ZIP_RE = re.compile(r'href="(https://' + _ZH + r'/zipper/\?url=[^"]+)"')
 _LIVE_LANGS = ("Hindi", "Tamil", "Telugu", "English", "Japanese",
                "Bengali", "Malayalam", "Urdu")
 # movie-hub source buttons (user request): ONLY WatchMultiQuality and
@@ -913,7 +1046,7 @@ _LIVE_LANGS = ("Hindi", "Tamil", "Telugu", "English", "Japanese",
 # HubCloud/DLBeta/Mega/MediaFire/4k/GB rows are download-only: dropped.
 _BTN_W = {"watchmultiquality": 0, "watchnow": 1, "download": 2}
 _ALL_BTN_RE = re.compile(
-    r'href="(https://codedew\.com/zipper/\?url=[^"]+)"[^>]*>'
+    r'href="(https://' + _ZH + r'/zipper/\?url=[^"]+)"[^>]*>'
     r"\s*([A-Za-z0-9 ]+?)\s*<", re.S)
 
 _ICONS = {"icon-192.png": "iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAAE4UlEQVR4nO3dwY0USRCF4ZwVtzlwXgxAWhvWgLUZA7ABCQMWN/ZQUqm2B4buflUZ70X+3xmhypi/I4sZBC+vrx8H8Kw/qh8A2QgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSD5UP4CL73//+dCv//z1x0VPkuVl2X/m99Fi3rdsT2sFdG40v7JUTEsENKebt1YoqXlAVekc9c6oZ0AO3bzVsqRuAXmmc9Qso1bfB/KvZ4Q85P2abKDEr0qPVRQfUGI6R+kZZV9h6fWM/CMEB5Q++l30QSKvsOiJvyPxOsvbQF3rGZlHCwsoccQPiTtgUkBxw31O1jFjAsoaqyjosBkBBQ30LClHDggoZZSnizi4e0ARQ7yO//GtA/If3wTmQ/ANyHxwMzmPwjQg55GVsB2IaUBI4RiQ7aetludY7AK6ekyfvny79Pe/lGFDXgHNGdCnL99yM3JryCugmXIbsmIU0PzPVugqslpCRgFVCc3IhEtA5Z+qrIbKx7WzCMhkHFmryGRoFgFZCWrIQX1AJp+ko5RV5DC6+oBspWRUi4B+g4beVxyQwxL+LedVVD5ANtC9nDMqVBlQ+afnCYYN1Y6RDfQwVtERAT2JjDZlASXeX2+ZNFQ4TDaQavFVREDnWLYhAjrNmquoJqAeL0A/VZVR1UjZQJdYZxUR0FUWudEI6FrtMyKgGRo3VBBQ4zfod0xYRSWDZQNN1e9GI6ACnRoioBptVhEBVWrQEAEVS19FBGQhNyMCMpLYEAF5iVtFH6ofAP/z7z9/VT/CY9hARuLqGWwgE4npbAioWG46G66wSun1DDZQlQbpbAhotjbpbAoC+vz1x5p/JejqdEr+02fegSZptnh2XGGX65rOhoAu1DudDVfYVVaoZ1RtoN7v0SXplLxBD66wcy2ydY64wk6zYD2DDXSKNdPZlAXU4zXIJJ2qF6DBFaYwqacWV9gzSGdXGVDiLWaYTuH9NbjCHmJYT7niKyxlCdmmU7t+RnlA/mzTMUFAv0Q696h/Bypfwj8VUY/D6NhAtyLS8WERkMmrdFY6DutnOFxhm/JxUM9zLDZQrax03BgFNP8iC03HZ/0MnytsvtB63BhtoDFrCUWnY7V+xhgvr68fq5/hlsOfyDy51TM8rzDDMTnwHItjQAhiGpDnp62Q7UBMAxrGI5vPeRS+AQ3vwU1jPgTrgIb9+K7mf3z3gEbCEC8ScfCAgEbIKM+VcuSMgEbOQE8RdNiYgEbUWBVZx0wKaKQN9wlxBwwLaASO+H6JR3P8YeqdOv3MNTGdTd4G2uUO/Ub0QYIDGuGj36QfIfgKO0q8ztLT2TQJaJOSUY90NtlX2I2IL0zEQ96v1Qbaea6iZulsega0cyipZTe75gFtqjLqnc5miYB2c0paoZvdWgEdnRvTUtEcrRvQjUd7WraYGwQESavvA2E+AoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAgSAoKEgCAhIEgICBICgoSAICEgSAgIEgKChIAgISBICAiS/wAopWLEgEoGGwAAAABJRU5ErkJggg==",
@@ -3441,11 +3574,11 @@ def api_watch(slug, season, episode, sess=None):
             if sess:
                 mt = re.match(rf"^/mq/({_B64_RE}+)\.m3u8$", url)
                 z = _unseal(mt.group(1)) if mt else ""
-                if z.startswith("https://codedew.com/"):
+                if _is_zip(z):
                     url = f"/mq/{_mq_new(z, sess, 's')}.m3u8"
         elif sess and _wn_proxied():
             wz = (c.get("behaviorHints") or {}).get("rt2z") or ""
-            tgt = wz if wz.startswith("https://codedew.com/") else url
+            tgt = wz if _is_zip(wz) else url
             if tgt.startswith("https://"):
                 url = f"/wn/{_mq_new(tgt, sess, 'w')}"      # same-origin, bound to this IP + session
         out.append({"lang": (ml.group(1).strip() if ml else "Default"),
@@ -4405,7 +4538,7 @@ class Handler(BaseHTTPRequestHandler):
         """Check a /mq link (and its session).  Returns the zipper, or None after answering the request.
         want: "s" playlist/segments, "d" download.  Old unbound links (Stremio) skip the session check."""
         p = _mq_parse(tok)
-        if not p or not p["z"].startswith("https://" if any_z else "https://codedew.com/"):
+        if not p or not (p["z"].startswith("https://") if any_z else _is_zip(p["z"])):
             self._send({"error": "bad token"}, 400)
             return None
         if self._banned and self._quiet("mq"):          # Step 6: banned visitor, old link
@@ -4648,7 +4781,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _wn_route(self, target, b64, attach=None):
         """WN file through our own proxy.  attach = file name -> a download (200 + attachment)."""
-        if target.startswith("https://codedew.com/"):
+        if _is_zip(target):
             # zipper payload: resolve FRESH at play time - the
             # card may be hours old, the file link is not
             u, _kind = _wn_resolve(target, stale_ok=False)

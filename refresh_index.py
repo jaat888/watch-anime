@@ -42,7 +42,7 @@ def _cf(r):
     return "just a moment" in t or "cf-chl" in t
 
 
-SITE = "https://www.rareanimes.mov"
+SITE = "https://www.rareanimes.foo"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"}
 
@@ -77,7 +77,7 @@ def is_real_hub(u):
 def _hub_links(text):
     """every on-site content link (any category), not only /hindi/."""
     out = set()
-    for m in re.findall(r'href=["\'](?:https?://(?:www\.)?rareanimes\.(?:mov|com))?(/[^"\'#?]+?)/?["\']', text):
+    for m in re.findall(r'href=["\'](?:https?://(?:www\.)?rareanimes\.(?:foo|mov|com))?(/[^"\'#?]+?)/?["\']', text):
         if is_real_hub(SITE + m):
             out.add(m)
     return out
@@ -85,7 +85,7 @@ def _hub_links(text):
 
 _SITEMAPS = ("/sitemap_index.xml", "/wp-sitemap.xml", "/sitemap.xml",
              "/post-sitemap.xml", "/page-sitemap.xml")
-_SAME_HOSTS = ("www.rareanimes.mov", "rareanimes.mov", "www.rareanimes.com", "rareanimes.com")
+_SAME_HOSTS = ("www.rareanimes.foo", "rareanimes.foo", "www.rareanimes.mov", "rareanimes.mov", "www.rareanimes.com", "rareanimes.com")
 
 
 def _sitemap_links(max_files=80):

@@ -34,8 +34,8 @@ STATE_JSON = ROOT / "crawl_state.json"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
-HOST = "www.rareanimes.mov"
-HOSTS = {"www.rareanimes.mov", "rareanimes.mov", "www.rareanimes.com", "rareanimes.com"}
+HOST = "www.rareanimes.foo"
+HOSTS = {"www.rareanimes.foo", "rareanimes.foo", "www.rareanimes.mov", "rareanimes.mov", "www.rareanimes.com", "rareanimes.com"}
 STORE_HOST = "store.animetoonhindi.com"
 
 SKIP_SUBSTR = (
@@ -192,7 +192,7 @@ def log_jsonl(path, obj):
 # ---------- parsing ----------
 def internal_links(html):
     out = set()
-    for m in re.finditer(r'href="(https?://www\.rareanimes\.mov/[^"]+)"', html):
+    for m in re.finditer(r'href="(https?://www\.rareanimes\.(?:foo|mov)/[^"]+)"', html):
         u = m.group(1).split("#")[0]
         if is_content(u):
             out.add(canon(u))
@@ -233,7 +233,7 @@ def parse_hub_page(url, html):
             if STORE_HOST in h:
                 if h not in watch_pages:
                     watch_pages.append(h)
-            elif "codedew.com" in h:
+            elif ("codedew.com" in h or "animetoonhindi.com" in h or "/zipper/" in h):
                 if is_download_link(h, t):
                     continue   # streaming files only, no downloads
                 streams.append({"label": t or "stream", "url": h})
@@ -261,7 +261,7 @@ def parse_store_page(url, html):
     for a in soup.find_all("a", href=True):
         h = a["href"].split("#")[0]
         t = a.get_text(" ", strip=True)
-        if "codedew.com" in h and EP_RE.search(t) and h not in seen:
+        if ("codedew.com" in h or "animetoonhindi.com" in h or "/zipper/" in h) and EP_RE.search(t) and h not in seen:
             if is_download_link(h, t):
                 continue   # streaming files only, no downloads
             seen.add(h)
@@ -269,7 +269,7 @@ def parse_store_page(url, html):
     for a in soup.find_all("a", href=True):
         h = a["href"].split("#")[0]
         t = a.get_text(" ", strip=True)
-        if "codedew.com" in h and h not in seen:
+        if ("codedew.com" in h or "animetoonhindi.com" in h or "/zipper/" in h) and h not in seen:
             if is_download_link(h, t):
                 continue   # streaming files only, no downloads
             seen.add(h)

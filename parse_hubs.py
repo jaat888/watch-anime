@@ -102,7 +102,7 @@ def is_streaming_url(u):
     if any(x in ul for x in ("zipcloud", "mega.nz", "mediafire",
                              "filepress", "gofile", "1fichier")):
         return False
-    return "codedew.com/zipper" in ul
+    return "/zipper/?url=" in ul
 
 
 def parse_html(html, hub, title, season_hint):
@@ -137,7 +137,7 @@ def parse_html(html, hub, title, season_hint):
             # (old two-line layout keeps working: no anchors here -> the
             # next element's links are attributed to cur_ep)
         anchors = [(classify_label(a.get_text(" ", strip=True)), a["href"])
-                   for a in el.find_all("a", href=True) if "codedew.com" in a["href"]]
+                   for a in el.find_all("a", href=True) if "/zipper/" in a["href"]]
         # streaming files only: drop download (dl) links entirely
         anchors = [(k, h) for k, h in anchors if k in ("mq", "sb") and is_streaming_url(h)]
         if not anchors:
